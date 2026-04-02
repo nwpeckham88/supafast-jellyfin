@@ -1,0 +1,12 @@
+target/
+
+# Rust/Cargo local files
+**/*.rs.bk
+
+# Environment and local overrides
+.env
+.env.*
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
