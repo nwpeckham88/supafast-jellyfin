@@ -14,6 +14,7 @@ fn sample_result(scan_id: Uuid) -> ScanResult {
     ScanResult {
         scan_id,
         media_type: "tv".to_string(),
+        base_path: "/tmp".to_string(),
         groups: Vec::new(),
         summary: ScanSummary {
             total_shows: 0,

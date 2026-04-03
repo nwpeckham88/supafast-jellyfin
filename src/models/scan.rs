@@ -19,6 +19,7 @@ pub struct ScanGroup {
 pub struct ScanResult {
     pub scan_id: Uuid,
     pub media_type: String,
+    pub base_path: String,
     pub groups: Vec<ScanGroup>,
     pub summary: ScanSummary,
 }

@@ -12,6 +12,7 @@ pub mod response;
 pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .merge(api::execute::router())
         .merge(api::scan::router())
         .with_state(state)
         .layer(from_fn(correlation_id_middleware))

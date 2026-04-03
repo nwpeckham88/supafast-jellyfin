@@ -75,6 +75,7 @@ impl ScanService for InMemoryScanService {
         let scan_result = ScanResult {
             scan_id,
             media_type: request.media_type,
+            base_path: request.base_path.clone(),
             groups,
             summary: ScanSummary {
                 total_shows,
