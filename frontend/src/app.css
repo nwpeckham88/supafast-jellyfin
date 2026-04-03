@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-top: #fff8e1;
+  --bg-bottom: #e4f2ff;
+  --ink: #1f2025;
+  --ink-soft: #4d5060;
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --warn: #b45309;
+  --danger: #b91c1c;
+  --card: #ffffffee;
+  --border: #0f172a1f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: 'Space Grotesk', 'Fira Sans', 'Segoe UI Variable', sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 80% 10%, #f8b4b455 0%, transparent 38%),
+    radial-gradient(circle at 20% 20%, #93c5fd66 0%, transparent 44%),
+    linear-gradient(175deg, var(--bg-top), var(--bg-bottom));
+}
+
+h1,
+h2,
+h3,
+button,
+label {
+  font-family: 'Sora', 'Avenir Next', sans-serif;
+}
+
+.glass {
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: 0 10px 32px #1f29371a;
+  backdrop-filter: blur(6px);
+}
+
+.fade-up {
+  animation: fade-up 320ms ease-out both;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

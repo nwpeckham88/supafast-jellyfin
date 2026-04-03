@@ -11,7 +11,10 @@ fn rejects_parent_traversal_escape() {
 
     let result = resolve_under_base(&base, Path::new("../outside/secret.mkv"));
 
-    assert!(matches!(result, Err(PathGuardError::InvalidCandidate(_)) | Err(PathGuardError::OutsideBase)));
+    assert!(matches!(
+        result,
+        Err(PathGuardError::InvalidCandidate(_)) | Err(PathGuardError::OutsideBase)
+    ));
 }
 
 #[test]
@@ -23,7 +26,8 @@ fn resolves_file_inside_base() {
     fs::create_dir_all(episode.parent().expect("parent")).expect("episode dir");
     fs::write(&episode, b"video").expect("episode file");
 
-    let resolved = resolve_under_base(&base, Path::new("Show/Season 1/episode.mkv")).expect("resolve");
+    let resolved =
+        resolve_under_base(&base, Path::new("Show/Season 1/episode.mkv")).expect("resolve");
 
     assert!(resolved.starts_with(base.canonicalize().expect("canonical base")));
 }
@@ -36,7 +40,8 @@ fn resolves_nonexistent_target_with_existing_parent() {
 
     fs::create_dir_all(&season_dir).expect("season dir");
 
-    let resolved = resolve_under_base(&base, Path::new("Show/Season 1/new-episode.mkv")).expect("resolve");
+    let resolved =
+        resolve_under_base(&base, Path::new("Show/Season 1/new-episode.mkv")).expect("resolve");
 
     assert_eq!(resolved, season_dir.join("new-episode.mkv"));
 }

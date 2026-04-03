@@ -1,11 +1,6 @@
 use axum::{
     extract::FromRequestParts,
-    http::{
-        header::HeaderName,
-        request::Parts,
-        HeaderValue,
-        Request,
-    },
+    http::{header::HeaderName, request::Parts, HeaderValue, Request},
     middleware::Next,
     response::Response,
 };
@@ -37,14 +32,10 @@ where
     type Rejection = (axum::http::StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .get::<CorrelationId>()
-            .cloned()
-            .ok_or((
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "missing correlation id".to_string(),
-            ))
+        parts.extensions.get::<CorrelationId>().cloned().ok_or((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "missing correlation id".to_string(),
+        ))
     }
 }
 

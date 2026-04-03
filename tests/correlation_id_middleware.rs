@@ -1,17 +1,9 @@
-use axum::{
-    body::Body,
-    http::Request,
-    middleware,
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
+use axum::{body::Body, http::Request, middleware, response::IntoResponse, routing::get, Router};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use supafast_jellyfin::http::middleware::correlation_id::{
-    correlation_id_middleware,
-    CorrelationId,
+    correlation_id_middleware, CorrelationId,
 };
 
 async fn handler(correlation_id: CorrelationId) -> impl IntoResponse {
@@ -25,7 +17,12 @@ async fn generates_correlation_id_when_missing() {
         .layer(middleware::from_fn(correlation_id_middleware));
 
     let response = app
-        .oneshot(Request::builder().uri("/").body(Body::empty()).expect("request"))
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .body(Body::empty())
+                .expect("request"),
+        )
         .await
         .expect("response");
 

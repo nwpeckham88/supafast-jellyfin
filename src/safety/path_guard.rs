@@ -12,7 +12,10 @@ pub enum PathGuardError {
     OutsideBase,
 }
 
-pub fn resolve_under_base(base_path: &Path, candidate_relative: &Path) -> Result<PathBuf, PathGuardError> {
+pub fn resolve_under_base(
+    base_path: &Path,
+    candidate_relative: &Path,
+) -> Result<PathBuf, PathGuardError> {
     if candidate_relative.is_absolute() {
         return Err(PathGuardError::OutsideBase);
     }
