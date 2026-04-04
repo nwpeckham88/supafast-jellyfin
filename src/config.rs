@@ -4,6 +4,7 @@ use crate::error::AppError;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
+    pub host: String,
     pub tv_base_path: PathBuf,
     pub movies_base_path: PathBuf,
     pub database_url: Option<String>,
@@ -16,6 +17,7 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self, AppError> {
         Ok(Self {
+            host: read_env_or_default("HOST", "127.0.0.1"),
             tv_base_path: PathBuf::from(read_env_or_default(
                 "TV_BASE_PATH",
                 "/mnt/nas/servarr/data/media/tv/",
@@ -102,12 +104,14 @@ mod tests {
         with_env_overrides(
             &[
                 ("PORT", None),
+                ("HOST", None),
                 ("SCAN_TTL_MINUTES", None),
                 ("FOLLOW_SYMLINKS", None),
             ],
             || {
                 let config = AppConfig::from_env().expect("config from env");
 
+                assert_eq!(config.host, "127.0.0.1");
                 assert_eq!(config.port, 3001);
                 assert_eq!(config.scan_ttl_minutes, 60);
                 assert!(!config.follow_symlinks);

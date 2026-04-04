@@ -32,6 +32,7 @@ fn test_app_with_service(
     scan_service: Arc<dyn ScanService>,
 ) -> axum::Router {
     let config = AppConfig {
+        host: "127.0.0.1".to_string(),
         tv_base_path: PathBuf::from("/tmp"),
         movies_base_path: PathBuf::from("/tmp"),
         database_url: None,

@@ -20,7 +20,7 @@
 
 <section class="glass fade-up rounded-2xl p-5 md:p-6">
   <div class="flex flex-wrap items-center justify-between gap-3">
-    <h2 class="text-xl font-semibold">Conflict Selection (Phase 2 Scaffold)</h2>
+    <h2 class="text-xl font-semibold">Conflict Selection</h2>
     <div class="flex items-center gap-2">
       <span class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-900">
         Unresolved: {unresolvedCount}

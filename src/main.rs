@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use supafast_jellyfin::config::AppConfig;
@@ -29,10 +28,15 @@ async fn main() -> anyhow::Result<()> {
 
     let app = build_app(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+    let bind_host = config.host.clone();
+    let bind_port = config.port;
+    let bind_target = (bind_host.as_str(), bind_port);
+    let listener = tokio::net::TcpListener::bind(bind_target)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to bind {bind_host}:{bind_port}: {error}"))?;
+    let addr = listener.local_addr()?;
     tracing::info!("starting server on {addr}");
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())

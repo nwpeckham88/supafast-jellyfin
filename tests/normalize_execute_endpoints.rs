@@ -16,6 +16,7 @@ use tower::ServiceExt;
 
 fn test_app() -> axum::Router {
     let config = AppConfig {
+        host: "127.0.0.1".to_string(),
         tv_base_path: PathBuf::from("/tmp"),
         movies_base_path: PathBuf::from("/tmp"),
         database_url: None,
@@ -339,7 +340,10 @@ async fn post_execute_renames_trickplay_companion_directory_when_present() {
         .as_array()
         .expect("entries array");
     assert!(entries.iter().any(|entry| {
-        entry["source_path"].as_str().unwrap_or_default().ends_with(".trickplay")
+        entry["source_path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(".trickplay")
             && entry["status"] == Value::String("succeeded".to_string())
     }));
 }

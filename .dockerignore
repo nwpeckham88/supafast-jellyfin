@@ -1,0 +1,12 @@
+.git
+.gitignore
+.claude
+.env
+.env.*
+target
+tmp
+frontend/node_modules
+frontend/.svelte-kit
+frontend/build
+frontend/.vite
+**/*.log

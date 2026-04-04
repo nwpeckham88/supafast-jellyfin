@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-supafast}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supafast}
+      POSTGRES_DB: ${POSTGRES_DB:-supafast_jellyfin}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-supafast} -d ${POSTGRES_DB:-supafast_jellyfin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3001
+      DATABASE_URL: ${DATABASE_URL:-postgres://supafast:supafast@postgres:5432/supafast_jellyfin}
+      SCAN_TTL_MINUTES: ${SCAN_TTL_MINUTES:-60}
+      FOLLOW_SYMLINKS: ${FOLLOW_SYMLINKS:-false}
+      TV_BASE_PATH: ${TV_BASE_PATH:-/media/tv}
+      MOVIES_BASE_PATH: ${MOVIES_BASE_PATH:-/media/movies}
+      AUDIT_LOG_DIR: ${AUDIT_LOG_DIR:-/var/log/supafast-jellyfin}
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - ./tmp/logs:/var/log/supafast-jellyfin
+      - ${TV_BASE_PATH_HOST:-./tmp/tv}:/media/tv
+      - ${MOVIES_BASE_PATH_HOST:-./tmp/movies}:/media/movies
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:3001}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  postgres_data:

@@ -10,6 +10,7 @@ use tower::ServiceExt;
 
 fn test_app() -> axum::Router {
     let config = AppConfig {
+        host: "127.0.0.1".to_string(),
         tv_base_path: PathBuf::from("/tmp"),
         movies_base_path: PathBuf::from("/tmp"),
         database_url: None,
