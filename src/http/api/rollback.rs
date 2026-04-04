@@ -1,5 +1,5 @@
 use axum::{
-    extract::{rejection::JsonRejection, State},
+    extract::{rejection::JsonRejection, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -8,10 +8,16 @@ use axum::{
 
 use crate::{
     http::response::ApiResponse,
-    models::rollback::{RollbackExecuteRequest, RollbackPreviewRequest, RollbackSessionsResponse},
+    models::rollback::{RollbackExecuteRequest, RollbackPreviewRequest},
     services::rollback::RollbackServiceError,
     state::AppState,
 };
+
+#[derive(Debug, serde::Deserialize)]
+struct PaginationQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -20,13 +26,25 @@ pub fn router() -> Router<AppState> {
         .route("/api/rollback/execute", post(rollback_execute))
 }
 
-async fn list_rollback_sessions(State(state): State<AppState>) -> Response {
-    match state.rollback_service.list_sessions().await {
-        Ok(sessions) => (
-            StatusCode::OK,
-            Json(ApiResponse::success(RollbackSessionsResponse { sessions })),
+async fn list_rollback_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<PaginationQuery>,
+) -> Response {
+    let page = query.page.unwrap_or(1);
+    let page_size = query.page_size.unwrap_or(50).min(200);
+    if page == 0 || page_size == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<serde_json::Value>::failure(
+                "invalid_request",
+                "page and page_size must be greater than zero",
+            )),
         )
-            .into_response(),
+            .into_response();
+    }
+
+    match state.rollback_service.list_sessions(page, page_size).await {
+        Ok(response) => (StatusCode::OK, Json(ApiResponse::success(response))).into_response(),
         Err(error) => map_rollback_error(error),
     }
 }
@@ -99,7 +117,9 @@ async fn rollback_execute(
     payload.idempotency_key = normalized_key.to_string();
 
     match state.rollback_service.execute(payload).await {
-        Ok(response) => (StatusCode::ACCEPTED, Json(ApiResponse::success(response))).into_response(),
+        Ok(response) => {
+            (StatusCode::ACCEPTED, Json(ApiResponse::success(response))).into_response()
+        }
         Err(error) => map_rollback_error(error),
     }
 }

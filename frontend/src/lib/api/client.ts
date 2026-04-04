@@ -24,30 +24,46 @@ export async function request<T>(
   path: string,
   init: RequestInit = {}
 ): Promise<T> {
-  const response = await fetch(buildUrl(path), {
-    headers: {
-      'content-type': 'application/json',
-      ...(init.headers ?? {})
-    },
-    ...init
-  });
+  const method = (init.method ?? 'GET').toUpperCase();
+  const canRetry = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
 
-  let envelope: ApiEnvelope<T>;
+  const executeRequest = async (): Promise<T> => {
+    const response = await fetch(buildUrl(path), {
+      headers: {
+        'content-type': 'application/json',
+        ...(init.headers ?? {})
+      },
+      ...init
+    });
+
+    let envelope: ApiEnvelope<T>;
+    try {
+      envelope = (await response.json()) as ApiEnvelope<T>;
+    } catch {
+      throw new ApiClientError(
+        'invalid_response',
+        'server returned a non-json response',
+        response.status
+      );
+    }
+
+    if (!response.ok || !envelope.success || envelope.data == null) {
+      const code = envelope.error?.code ?? 'request_failed';
+      const message = envelope.error?.message ?? 'request failed';
+      throw new ApiClientError(code, message, response.status);
+    }
+
+    return envelope.data;
+  };
+
   try {
-    envelope = (await response.json()) as ApiEnvelope<T>;
-  } catch {
-    throw new ApiClientError(
-      'invalid_response',
-      'server returned a non-json response',
-      response.status
-    );
-  }
+    return await executeRequest();
+  } catch (error) {
+    const transientHttpError = error instanceof ApiClientError && error.status >= 500;
+    if (!transientHttpError || !canRetry) {
+      throw error;
+    }
 
-  if (!response.ok || !envelope.success || envelope.data == null) {
-    const code = envelope.error?.code ?? 'request_failed';
-    const message = envelope.error?.message ?? 'request failed';
-    throw new ApiClientError(code, message, response.status);
+    return executeRequest();
   }
-
-  return envelope.data;
 }

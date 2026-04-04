@@ -16,6 +16,15 @@ pub struct RollbackSessionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollbackSessionsResponse {
     pub sessions: Vec<RollbackSessionSummary>,
+    pub pagination: RollbackPaginationMeta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackPaginationMeta {
+    pub page: usize,
+    pub page_size: usize,
+    pub total: usize,
+    pub total_pages: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1,6 +1,10 @@
 import type {
   CreateScanPayload,
+  ExecuteNormalizeRequest,
+  ExecuteNormalizeResponse,
   ExpireScanResult,
+  NormalizeJobEntriesResponse,
+  NormalizeJobStatusResponse,
   RollbackExecuteRequest,
   RollbackExecuteResponse,
   RollbackPreviewResponse,
@@ -27,8 +31,36 @@ export function expireScan(scanId: string): Promise<ExpireScanResult> {
   });
 }
 
-export function listRollbackSessions(): Promise<RollbackSessionsResponse> {
-  return request<RollbackSessionsResponse>('/api/rollback/sessions');
+export function listRollbackSessions(
+  page = 1,
+  pageSize = 50
+): Promise<RollbackSessionsResponse> {
+  return request<RollbackSessionsResponse>(
+    `/api/rollback/sessions?page=${page}&page_size=${pageSize}`
+  );
+}
+
+export function executeNormalize(
+  payload: ExecuteNormalizeRequest
+): Promise<ExecuteNormalizeResponse> {
+  return request<ExecuteNormalizeResponse>('/api/normalize/execute', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getNormalizeJobStatus(jobId: string): Promise<NormalizeJobStatusResponse> {
+  return request<NormalizeJobStatusResponse>(`/api/normalize/jobs/${jobId}`);
+}
+
+export function getNormalizeJobEntries(
+  jobId: string,
+  page: number,
+  pageSize: number
+): Promise<NormalizeJobEntriesResponse> {
+  return request<NormalizeJobEntriesResponse>(
+    `/api/normalize/jobs/${jobId}/entries?page=${page}&page_size=${pageSize}`
+  );
 }
 
 export function previewRollback(sessionId: string): Promise<RollbackPreviewResponse> {

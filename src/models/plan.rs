@@ -5,6 +5,7 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum PlanOpType {
     RenameDir,
+    RenameFile,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

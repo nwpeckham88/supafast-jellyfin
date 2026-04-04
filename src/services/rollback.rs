@@ -15,8 +15,8 @@ use crate::{
         execute::NormalizeJobStatus,
         rollback::{
             RollbackExecuteRequest, RollbackExecuteResponse, RollbackJobStatus,
-            RollbackOperationPreview, RollbackPreviewRequest, RollbackPreviewResponse,
-            RollbackSessionSummary,
+            RollbackOperationPreview, RollbackPaginationMeta, RollbackPreviewRequest,
+            RollbackPreviewResponse, RollbackSessionSummary, RollbackSessionsResponse,
         },
     },
     repositories::execute_repo::{ExecuteRepository, ExecuteRepositoryError, JobRecord},
@@ -39,7 +39,11 @@ pub enum RollbackServiceError {
 
 #[async_trait]
 pub trait RollbackService: Send + Sync {
-    async fn list_sessions(&self) -> Result<Vec<RollbackSessionSummary>, RollbackServiceError>;
+    async fn list_sessions(
+        &self,
+        page: usize,
+        page_size: usize,
+    ) -> Result<RollbackSessionsResponse, RollbackServiceError>;
 
     async fn preview(
         &self,
@@ -95,7 +99,17 @@ impl InMemoryRollbackService {
 
 #[async_trait]
 impl RollbackService for InMemoryRollbackService {
-    async fn list_sessions(&self) -> Result<Vec<RollbackSessionSummary>, RollbackServiceError> {
+    async fn list_sessions(
+        &self,
+        page: usize,
+        page_size: usize,
+    ) -> Result<RollbackSessionsResponse, RollbackServiceError> {
+        if page == 0 || page_size == 0 {
+            return Err(RollbackServiceError::Internal(
+                "invalid pagination parameters".to_string(),
+            ));
+        }
+
         let mut sessions = self
             .execute_repository
             .list_jobs()
@@ -141,7 +155,29 @@ impl RollbackService for InMemoryRollbackService {
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
 
-        Ok(sessions)
+        let total = sessions.len();
+        let total_pages = if total == 0 {
+            0
+        } else {
+            ((total - 1) / page_size) + 1
+        };
+        let start = page.saturating_sub(1).saturating_mul(page_size);
+        let end = std::cmp::min(start + page_size, total);
+        let paged = if start >= total {
+            Vec::new()
+        } else {
+            sessions[start..end].to_vec()
+        };
+
+        Ok(RollbackSessionsResponse {
+            sessions: paged,
+            pagination: RollbackPaginationMeta {
+                page,
+                page_size,
+                total,
+                total_pages,
+            },
+        })
     }
 
     async fn preview(
@@ -203,7 +239,10 @@ impl RollbackService for InMemoryRollbackService {
             return Err(RollbackServiceError::SessionNotRollbackable);
         }
 
-        if operations.iter().any(|operation| operation.blocked_reason.is_some()) {
+        if operations
+            .iter()
+            .any(|operation| operation.blocked_reason.is_some())
+        {
             return Err(RollbackServiceError::Preflight);
         }
 
@@ -313,7 +352,8 @@ async fn run_rollback_job(
 
         match rename_result {
             Ok(Ok(())) => {
-                applied_operations.push((operation.source_path.clone(), operation.target_path.clone()));
+                applied_operations
+                    .push((operation.source_path.clone(), operation.target_path.clone()));
                 job_record.reverted_operations += 1;
                 update_rollback_job(&rollback_state, job_record.clone())?;
             }
@@ -442,7 +482,10 @@ async fn find_session(
     execute_repository: &dyn ExecuteRepository,
     session_id: Uuid,
 ) -> Result<JobRecord, RollbackServiceError> {
-    let jobs = execute_repository.list_jobs().await.map_err(map_repo_error)?;
+    let jobs = execute_repository
+        .list_jobs()
+        .await
+        .map_err(map_repo_error)?;
     let Some(session) = jobs.into_iter().find(|job| job.job_id == session_id) else {
         return Err(RollbackServiceError::SessionNotFound);
     };
@@ -485,7 +528,9 @@ fn claim_rollback_job(
     }
 
     state.key_to_job_id.insert(key, candidate.rollback_job_id);
-    state.jobs_by_id.insert(candidate.rollback_job_id, candidate.clone());
+    state
+        .jobs_by_id
+        .insert(candidate.rollback_job_id, candidate.clone());
     Ok(ClaimRollbackResult::Created(candidate))
 }
 
@@ -497,9 +542,10 @@ fn update_rollback_job(
         .write()
         .map_err(|_| RollbackServiceError::Internal("rollback state lock poisoned".to_string()))?;
 
-    state
-        .key_to_job_id
-        .insert(rollback_key(record.session_id, &record.idempotency_key), record.rollback_job_id);
+    state.key_to_job_id.insert(
+        rollback_key(record.session_id, &record.idempotency_key),
+        record.rollback_job_id,
+    );
     state.jobs_by_id.insert(record.rollback_job_id, record);
     Ok(())
 }
@@ -541,5 +587,8 @@ fn map_repo_error(error: ExecuteRepositoryError) -> RollbackServiceError {
 }
 
 fn is_terminal_rollback_source(session: &JobRecord) -> bool {
-    matches!(session.status, NormalizeJobStatus::Completed | NormalizeJobStatus::Failed)
+    matches!(
+        session.status,
+        NormalizeJobStatus::Completed | NormalizeJobStatus::Failed
+    )
 }

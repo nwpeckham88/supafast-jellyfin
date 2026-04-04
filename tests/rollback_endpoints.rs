@@ -130,7 +130,7 @@ async fn list_rollback_sessions_returns_execute_session() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/rollback/sessions")
+                .uri("/api/rollback/sessions?page=1&page_size=1")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -141,10 +141,35 @@ async fn list_rollback_sessions_returns_execute_session() {
     let body = parse_json(response).await;
     assert_eq!(body["success"], Value::Bool(true));
     let sessions = body["data"]["sessions"].as_array().expect("sessions array");
-    assert!(
-        sessions
-            .iter()
-            .any(|session| session["session_id"] == Value::String(session_id.clone()))
+    assert_eq!(body["data"]["pagination"]["page"], Value::from(1));
+    assert_eq!(body["data"]["pagination"]["page_size"], Value::from(1));
+    assert!(body["data"]["pagination"]["total"].as_u64().unwrap_or(0) >= 1);
+    assert!(sessions
+        .iter()
+        .any(|session| session["session_id"] == Value::String(session_id.clone())));
+}
+
+#[tokio::test]
+async fn list_rollback_sessions_rejects_invalid_pagination_params() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/rollback/sessions?page=0&page_size=10")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = parse_json(response).await;
+    assert_eq!(body["success"], Value::Bool(false));
+    assert_eq!(
+        body["error"]["code"],
+        Value::String("invalid_request".to_string())
     );
 }
 
@@ -271,7 +296,10 @@ async fn rollback_execute_rejects_same_key_with_different_payload() {
 
     assert_eq!(second_response.status(), StatusCode::CONFLICT);
     let body = parse_json(second_response).await;
-    assert_eq!(body["error"]["code"], Value::String("idempotency_conflict".to_string()));
+    assert_eq!(
+        body["error"]["code"],
+        Value::String("idempotency_conflict".to_string())
+    );
 }
 
 #[tokio::test]
@@ -322,7 +350,10 @@ async fn rollback_execute_restores_original_directory_names() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert!(temp.path().join("A Perfect Planet 2021 - [tmdbid-115194]").exists());
+    assert!(temp
+        .path()
+        .join("A Perfect Planet 2021 - [tmdbid-115194]")
+        .exists());
     assert!(temp.path().join("Animaniacs 1993 - [tmdbid-82]").exists());
 }
 

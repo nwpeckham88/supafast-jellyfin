@@ -3,6 +3,7 @@ use std::{
     hash::{Hash, Hasher},
     path::{Component, Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -13,13 +14,16 @@ use crate::{
     models::{
         audit::{AuditEntry, AuditOpStatus},
         execute::{
-            ExecuteNormalizeRequest, ExecuteNormalizeResponse, NormalizeJobResponse,
-            NormalizeJobStatus,
+            ExecuteNormalizeRequest, ExecuteNormalizeResponse, NormalizeJobEntriesResponse,
+            NormalizeJobListResponse, NormalizeJobResponse, NormalizeJobStatus,
+            NormalizeJobSummary, PaginationMeta,
         },
         plan::{NormalizePlan, PlanOpType, PlanOperation},
         scan::ScanResult,
     },
-    repositories::execute_repo::{ClaimJobResult, ExecuteRepository, ExecuteRepositoryError, JobRecord},
+    repositories::execute_repo::{
+        ClaimJobResult, ExecuteRepository, ExecuteRepositoryError, JobRecord,
+    },
     safety::{base_path_lock::BasePathLockManager, path_guard},
     services::scan::ScanService,
 };
@@ -49,6 +53,19 @@ pub trait ExecuteService: Send + Sync {
         &self,
         job_id: Uuid,
     ) -> Result<Option<NormalizeJobResponse>, ExecuteServiceError>;
+
+    async fn list_jobs(
+        &self,
+        page: usize,
+        page_size: usize,
+    ) -> Result<NormalizeJobListResponse, ExecuteServiceError>;
+
+    async fn get_job_entries(
+        &self,
+        job_id: Uuid,
+        page: usize,
+        page_size: usize,
+    ) -> Result<Option<NormalizeJobEntriesResponse>, ExecuteServiceError>;
 }
 
 pub struct InMemoryExecuteService {
@@ -116,9 +133,14 @@ impl ExecuteService for InMemoryExecuteService {
         }
 
         let plan = build_plan(&scan, &request)?;
+        validate_plan_for_media_type(&plan)?;
         preflight_validate(&plan, request.dry_run)?;
 
-        if !self.base_path_lock.try_acquire(&canonical_request_base).await {
+        if !self
+            .base_path_lock
+            .try_acquire(&canonical_request_base)
+            .await
+        {
             return Err(ExecuteServiceError::Preflight);
         }
 
@@ -130,7 +152,7 @@ impl ExecuteService for InMemoryExecuteService {
                 op_id: operation.op_id,
                 op_index: operation.op_index,
                 session_id: job_id,
-                op_type: "rename_dir".to_string(),
+                op_type: map_plan_op_type(operation.op_type).to_string(),
                 source_path: operation.source_path.clone(),
                 target_path: operation.target_path.clone(),
                 file_size: None,
@@ -141,6 +163,7 @@ impl ExecuteService for InMemoryExecuteService {
 
         let pending_job = JobRecord {
             job_id,
+            created_at_ms: current_timestamp_ms(),
             scan_id: request.scan_id,
             idempotency_key: request.idempotency_key.clone(),
             media_type: request.media_type.clone(),
@@ -197,32 +220,88 @@ impl ExecuteService for InMemoryExecuteService {
         &self,
         job_id: Uuid,
     ) -> Result<Option<NormalizeJobResponse>, ExecuteServiceError> {
-        let Some(job) = self.repository.get_job(job_id).await.map_err(map_repo_error)? else {
+        let Some(job) = self
+            .repository
+            .get_job(job_id)
+            .await
+            .map_err(map_repo_error)?
+        else {
             return Ok(None);
         };
 
-        let total_ops = job.entries.len();
-        let completed_ops = job
-            .entries
-            .iter()
-            .filter(|entry| entry.status == AuditOpStatus::Succeeded)
-            .count();
-        let failed_ops = job
-            .entries
-            .iter()
-            .filter(|entry| entry.status == AuditOpStatus::Failed)
-            .count();
+        let summary = summarize_job(&job);
 
         Ok(Some(NormalizeJobResponse {
-            job_id: job.job_id,
-            scan_id: job.scan_id,
-            status: job.status,
-            plan_hash: job.plan_hash,
-            total_ops,
-            completed_ops,
-            failed_ops,
-            error: job.error,
+            job_id: summary.job_id,
+            scan_id: summary.scan_id,
+            status: summary.status,
+            plan_hash: summary.plan_hash,
+            total_ops: summary.total_ops,
+            completed_ops: summary.completed_ops,
+            failed_ops: summary.failed_ops,
+            error: summary.error,
             entries: job.entries,
+        }))
+    }
+
+    async fn list_jobs(
+        &self,
+        page: usize,
+        page_size: usize,
+    ) -> Result<NormalizeJobListResponse, ExecuteServiceError> {
+        if page == 0 || page_size == 0 {
+            return Err(ExecuteServiceError::Internal(
+                "invalid pagination parameters".to_string(),
+            ));
+        }
+
+        let mut jobs = self.repository.list_jobs().await.map_err(map_repo_error)?;
+        jobs.sort_by(|left, right| right.created_at_ms.cmp(&left.created_at_ms));
+
+        let total = jobs.len();
+        let pagination = build_pagination_meta(total, page, page_size);
+        let (start, end) = page_bounds(total, page, page_size);
+
+        let paged_jobs = jobs[start..end]
+            .iter()
+            .map(summarize_job)
+            .collect::<Vec<_>>();
+
+        Ok(NormalizeJobListResponse {
+            jobs: paged_jobs,
+            pagination,
+        })
+    }
+
+    async fn get_job_entries(
+        &self,
+        job_id: Uuid,
+        page: usize,
+        page_size: usize,
+    ) -> Result<Option<NormalizeJobEntriesResponse>, ExecuteServiceError> {
+        if page == 0 || page_size == 0 {
+            return Err(ExecuteServiceError::Internal(
+                "invalid pagination parameters".to_string(),
+            ));
+        }
+
+        let Some(job) = self
+            .repository
+            .get_job(job_id)
+            .await
+            .map_err(map_repo_error)?
+        else {
+            return Ok(None);
+        };
+
+        let total = job.entries.len();
+        let pagination = build_pagination_meta(total, page, page_size);
+        let (start, end) = page_bounds(total, page, page_size);
+
+        Ok(Some(NormalizeJobEntriesResponse {
+            job_id,
+            entries: job.entries[start..end].to_vec(),
+            pagination,
         }))
     }
 }
@@ -263,10 +342,17 @@ async fn run_job(
 
         let source_path = job.entries[index].source_path.clone();
         let target_path = job.entries[index].target_path.clone();
-        if revalidate_operation_paths(&canonical_base, Path::new(&source_path), Path::new(&target_path)).is_err() {
+        if revalidate_operation_paths(
+            &canonical_base,
+            Path::new(&source_path),
+            Path::new(&target_path),
+        )
+        .is_err()
+        {
             tracing::warn!("execute preflight revalidation failed");
             job.entries[index].status = AuditOpStatus::Failed;
-            job.entries[index].error_message = Some("operation failed safety revalidation".to_string());
+            job.entries[index].error_message =
+                Some("operation failed safety revalidation".to_string());
             job.status = NormalizeJobStatus::Failed;
             job.error = Some("operation failed safety revalidation".to_string());
             let _ = repository.update_job(job).await;
@@ -274,7 +360,12 @@ async fn run_job(
             return;
         }
 
-        let rename_outcome = tokio::task::spawn_blocking(move || std::fs::rename(&source_path, &target_path)).await;
+        let source_for_rename = source_path.clone();
+        let target_for_rename = target_path.clone();
+        let rename_outcome = tokio::task::spawn_blocking(move || {
+            std::fs::rename(&source_for_rename, &target_for_rename)
+        })
+        .await;
         match rename_outcome {
             Ok(Ok(())) => {
                 job.entries[index].status = AuditOpStatus::Succeeded;
@@ -336,7 +427,11 @@ fn build_plan(
 
     for group in &scan.groups {
         if let Some(selected) = conflict_resolutions.get(group.normalized_name.as_str()) {
-            if !group.source_directories.iter().any(|source| source == selected) {
+            if !group
+                .source_directories
+                .iter()
+                .any(|source| source == selected)
+            {
                 return Err(ExecuteServiceError::Preflight);
             }
         }
@@ -382,17 +477,27 @@ fn build_plan(
 
     let operations = operations
         .into_iter()
-        .enumerate()
-        .map(|(index, (_, _, source_path, target_path))| PlanOperation {
-            op_id: Uuid::from_u128((index + 1) as u128),
-            op_index: index,
+        .map(|(_, _, source_path, target_path)| PlanOperation {
+            op_id: Uuid::nil(),
+            op_index: 0,
             op_type: PlanOpType::RenameDir,
             source_path: source_path.to_string_lossy().to_string(),
             target_path: target_path.to_string_lossy().to_string(),
         })
         .collect::<Vec<_>>();
 
-    let plan_hash = compute_plan_hash(scan.scan_id, &request.base_path, &request.media_type, &operations)?;
+    let mut operations = append_trickplay_companion_operations(operations);
+    for (index, operation) in operations.iter_mut().enumerate() {
+        operation.op_id = Uuid::from_u128((index + 1) as u128);
+        operation.op_index = index;
+    }
+
+    let plan_hash = compute_plan_hash(
+        scan.scan_id,
+        &request.base_path,
+        &request.media_type,
+        &operations,
+    )?;
 
     Ok(NormalizePlan {
         plan_hash,
@@ -572,3 +677,104 @@ fn canonicalize_base_path(path: &str) -> Result<String, ExecuteServiceError> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
+fn map_plan_op_type(op_type: PlanOpType) -> &'static str {
+    match op_type {
+        PlanOpType::RenameDir => "rename_dir",
+        PlanOpType::RenameFile => "rename_file",
+    }
+}
+
+fn validate_plan_for_media_type(plan: &NormalizePlan) -> Result<(), ExecuteServiceError> {
+    if plan.media_type == "movie"
+        && plan
+            .operations
+            .iter()
+            .any(|operation| operation.op_type != PlanOpType::RenameDir)
+    {
+        return Err(ExecuteServiceError::Preflight);
+    }
+
+    Ok(())
+}
+
+fn append_trickplay_companion_operations(operations: Vec<PlanOperation>) -> Vec<PlanOperation> {
+    let mut output = operations;
+    let mut companion_ops = Vec::new();
+
+    for operation in &output {
+        let source_trickplay = format!("{}.trickplay", operation.source_path);
+        let target_trickplay = format!("{}.trickplay", operation.target_path);
+        let source_path = Path::new(&source_trickplay);
+        if !source_path.is_dir() {
+            continue;
+        }
+
+        companion_ops.push(PlanOperation {
+            op_id: Uuid::nil(),
+            op_index: 0,
+            op_type: PlanOpType::RenameDir,
+            source_path: source_trickplay,
+            target_path: target_trickplay,
+        });
+    }
+
+    output.extend(companion_ops);
+    output
+}
+
+fn summarize_job(job: &JobRecord) -> NormalizeJobSummary {
+    let total_ops = job.entries.len();
+    let completed_ops = job
+        .entries
+        .iter()
+        .filter(|entry| entry.status == AuditOpStatus::Succeeded)
+        .count();
+    let failed_ops = job
+        .entries
+        .iter()
+        .filter(|entry| entry.status == AuditOpStatus::Failed)
+        .count();
+
+    NormalizeJobSummary {
+        job_id: job.job_id,
+        scan_id: job.scan_id,
+        status: job.status,
+        plan_hash: job.plan_hash.clone(),
+        total_ops,
+        completed_ops,
+        failed_ops,
+        error: job.error.clone(),
+    }
+}
+
+fn build_pagination_meta(total: usize, page: usize, page_size: usize) -> PaginationMeta {
+    let total_pages = if total == 0 {
+        0
+    } else {
+        ((total - 1) / page_size) + 1
+    };
+
+    PaginationMeta {
+        page,
+        page_size,
+        total,
+        total_pages,
+    }
+}
+
+fn page_bounds(total: usize, page: usize, page_size: usize) -> (usize, usize) {
+    let start = page.saturating_sub(1).saturating_mul(page_size);
+    if start >= total {
+        return (total, total);
+    }
+
+    let end = std::cmp::min(start + page_size, total);
+    (start, end)
+}
+
+fn current_timestamp_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}

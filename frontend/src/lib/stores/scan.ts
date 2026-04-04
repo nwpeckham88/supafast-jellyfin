@@ -2,6 +2,7 @@ import { writable } from 'svelte/store';
 
 import { createScan, expireScan, getScan } from '$lib/api/normalize';
 import type { MediaType, ScanResult } from '$lib/models/normalize';
+import { notificationsStore } from '$lib/stores/notifications';
 
 export interface ScanStoreState {
   mediaType: MediaType;
@@ -46,9 +47,11 @@ function createScanStore() {
           base_path: requestBasePath
         });
         update((state) => ({ ...state, scanResult: result, loading: false }));
+        notificationsStore.success('Scan created successfully.');
       } catch (error) {
         const message = error instanceof Error ? error.message : 'scan failed';
         update((state) => ({ ...state, error: message, loading: false }));
+        notificationsStore.error(`Scan failed: ${message}`);
       }
     },
     async refreshScan() {
@@ -66,9 +69,11 @@ function createScanStore() {
       try {
         const result = await getScan(scanId);
         update((state) => ({ ...state, scanResult: result, loading: false }));
+        notificationsStore.info('Scan refreshed.');
       } catch (error) {
         const message = error instanceof Error ? error.message : 'scan refresh failed';
         update((state) => ({ ...state, error: message, loading: false }));
+        notificationsStore.error(`Refresh failed: ${message}`);
       }
     },
     async clearScanSession(): Promise<boolean> {
@@ -85,11 +90,13 @@ function createScanStore() {
           const message =
             error instanceof Error ? error.message : 'failed to expire scan';
           update((state) => ({ ...state, error: message, loading: false }));
+          notificationsStore.error(`Expire scan failed: ${message}`);
           return false;
         }
       }
 
       set({ ...initialState });
+      notificationsStore.success('Scan session cleared.');
       return true;
     }
   };

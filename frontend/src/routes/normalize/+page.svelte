@@ -2,11 +2,13 @@
   import type { ScanResult } from '$lib/models/normalize';
 
   import ConflictPanel from '$lib/components/conflicts/ConflictPanel.svelte';
+  import ExecutePanel from '$lib/components/execute/ExecutePanel.svelte';
   import PreviewTree from '$lib/components/preview/PreviewTree.svelte';
   import RollbackPanel from '$lib/components/rollback/RollbackPanel.svelte';
   import ScanRequestForm from '$lib/components/scan/ScanRequestForm.svelte';
   import ScanSummaryCard from '$lib/components/scan/ScanSummaryCard.svelte';
   import { conflictsStore } from '$lib/stores/conflicts';
+  import { executeStore } from '$lib/stores/execute';
   import { rollbackStore } from '$lib/stores/rollback';
   import { scanStore } from '$lib/stores/scan';
 
@@ -24,6 +26,7 @@
 
     lastSeededResult = result;
     conflictsStore.seedFromScan(result);
+    executeStore.syncFromScan(result);
   });
 
   $effect(() => {
@@ -79,6 +82,7 @@
         const cleared = await scanStore.clearScanSession();
         if (cleared) {
           conflictsStore.reset();
+          executeStore.reset();
         }
       }}
       type="button"
@@ -97,8 +101,49 @@
     onReset={() => conflictsStore.reset()}
   />
 
+  <ExecutePanel
+    idempotencyKey={$executeStore.idempotencyKey}
+    jobId={$executeStore.jobId}
+    status={$executeStore.status}
+    totalOps={$executeStore.totalOps}
+    completedOps={$executeStore.completedOps}
+    failedOps={$executeStore.failedOps}
+    entries={$executeStore.entries}
+    entriesPage={$executeStore.entriesPage}
+    entriesTotalPages={$executeStore.entriesTotalPages}
+    entriesTotal={$executeStore.entriesTotal}
+    submitting={$executeStore.submitting}
+    polling={$executeStore.polling}
+    loadingEntries={$executeStore.loadingEntries}
+    error={$executeStore.error}
+    onIdempotencyKeyChange={(value) => executeStore.setIdempotencyKey(value)}
+    onDryRun={() =>
+      executeStore.startExecute({
+        scanResult: $scanStore.scanResult,
+        idempotencyKey: $executeStore.idempotencyKey,
+        dryRun: true,
+        conflictItems: $conflictItems,
+        conflictSelections: $conflictSelections
+      })}
+    onExecute={() =>
+      executeStore.startExecute({
+        scanResult: $scanStore.scanResult,
+        idempotencyKey: $executeStore.idempotencyKey,
+        dryRun: false,
+        conflictItems: $conflictItems,
+        conflictSelections: $conflictSelections
+      })}
+    onRefreshStatus={() => executeStore.refreshStatus()}
+    onRefreshEntries={() => executeStore.refreshEntries()}
+    onPreviousEntriesPage={() => executeStore.previousEntriesPage()}
+    onNextEntriesPage={() => executeStore.nextEntriesPage()}
+  />
+
   <RollbackPanel
     sessions={$rollbackStore.sessions}
+    sessionsPage={$rollbackStore.sessionsPage}
+    sessionsTotalPages={$rollbackStore.sessionsTotalPages}
+    sessionsTotal={$rollbackStore.sessionsTotal}
     selectedSessionId={$rollbackStore.selectedSessionId}
     idempotencyKey={$rollbackStore.idempotencyKey}
     preview={$rollbackStore.preview}
@@ -110,6 +155,8 @@
     onSelectSession={(value) => rollbackStore.setSelectedSession(value)}
     onIdempotencyKeyChange={(value) => rollbackStore.setIdempotencyKey(value)}
     onRefreshSessions={() => rollbackStore.refreshSessions()}
+    onPreviousSessionsPage={() => rollbackStore.previousSessionsPage()}
+    onNextSessionsPage={() => rollbackStore.nextSessionsPage()}
     onLoadPreview={() => rollbackStore.loadPreview()}
     onDryRun={() => rollbackStore.runRollback(true)}
     onExecute={() => rollbackStore.runRollback(false)}

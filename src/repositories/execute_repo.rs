@@ -9,6 +9,7 @@ use crate::models::{audit::AuditEntry, execute::NormalizeJobStatus};
 #[derive(Debug, Clone)]
 pub struct JobRecord {
     pub job_id: Uuid,
+    pub created_at_ms: u128,
     pub scan_id: Uuid,
     pub idempotency_key: String,
     pub media_type: String,
@@ -41,7 +42,10 @@ pub trait ExecuteRepository: Send + Sync {
         idempotency_key: &str,
     ) -> Result<Option<JobRecord>, ExecuteRepositoryError>;
 
-    async fn claim_job(&self, candidate: JobRecord) -> Result<ClaimJobResult, ExecuteRepositoryError>;
+    async fn claim_job(
+        &self,
+        candidate: JobRecord,
+    ) -> Result<ClaimJobResult, ExecuteRepositoryError>;
 
     async fn get_job(&self, job_id: Uuid) -> Result<Option<JobRecord>, ExecuteRepositoryError>;
 
@@ -86,14 +90,20 @@ impl ExecuteRepository for InMemoryExecuteRepository {
         Ok(guard.jobs_by_id.get(&job_id).cloned())
     }
 
-    async fn claim_job(&self, candidate: JobRecord) -> Result<ClaimJobResult, ExecuteRepositoryError> {
+    async fn claim_job(
+        &self,
+        candidate: JobRecord,
+    ) -> Result<ClaimJobResult, ExecuteRepositoryError> {
         let mut guard = self
             .state
             .write()
             .map_err(|_| ExecuteRepositoryError::LockPoisoned)?;
         let maybe_existing = guard
             .key_to_job_id
-            .get(&composite_key(candidate.scan_id, &candidate.idempotency_key))
+            .get(&composite_key(
+                candidate.scan_id,
+                &candidate.idempotency_key,
+            ))
             .and_then(|job_id| guard.jobs_by_id.get(job_id))
             .cloned();
 
@@ -104,12 +114,10 @@ impl ExecuteRepository for InMemoryExecuteRepository {
             return Ok(ClaimJobResult::Conflict);
         }
 
-        guard
-            .key_to_job_id
-            .insert(
-                composite_key(candidate.scan_id, &candidate.idempotency_key),
-                candidate.job_id,
-            );
+        guard.key_to_job_id.insert(
+            composite_key(candidate.scan_id, &candidate.idempotency_key),
+            candidate.job_id,
+        );
         guard.jobs_by_id.insert(candidate.job_id, candidate.clone());
         Ok(ClaimJobResult::Created(candidate))
     }
@@ -139,9 +147,7 @@ impl ExecuteRepository for InMemoryExecuteRepository {
 
         let key = composite_key(record.scan_id, &record.idempotency_key);
         if !guard.key_to_job_id.contains_key(&key) {
-            guard
-                .key_to_job_id
-            .insert(key, record.job_id);
+            guard.key_to_job_id.insert(key, record.job_id);
         }
         guard.jobs_by_id.insert(record.job_id, record);
 

@@ -37,7 +37,18 @@ async fn parse_json(response: axum::response::Response) -> Value {
 }
 
 async fn create_scan(app: &axum::Router, base_path: &str) -> String {
-    let request_body = format!(r#"{{"media_type":"tv","base_path":"{}"}}"#, base_path);
+    create_scan_with_media_type(app, base_path, "tv").await
+}
+
+async fn create_scan_with_media_type(
+    app: &axum::Router,
+    base_path: &str,
+    media_type: &str,
+) -> String {
+    let request_body = format!(
+        r#"{{"media_type":"{}","base_path":"{}"}}"#,
+        media_type, base_path
+    );
     let response = app
         .clone()
         .oneshot(
@@ -57,6 +68,280 @@ async fn create_scan(app: &axum::Router, base_path: &str) -> String {
         .as_str()
         .expect("scan_id")
         .to_string()
+}
+
+#[tokio::test]
+async fn post_execute_movie_mode_renames_directory_only() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(temp.path().join("Spider-Man: Into the Spider-Verse (2018)"))
+        .expect("create source dir");
+
+    let scan_id =
+        create_scan_with_media_type(&app, &temp.path().display().to_string(), "movie").await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"movie-key","media_type":"movie","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":true}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    let status_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/normalize/jobs/{job_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status_body = parse_json(status_response).await;
+    let entries = status_body["data"]["entries"]
+        .as_array()
+        .expect("entries array");
+    assert!(!entries.is_empty());
+    assert!(entries
+        .iter()
+        .all(|entry| entry["op_type"] == Value::String("rename_dir".to_string())));
+}
+
+#[tokio::test]
+async fn list_jobs_returns_paginated_results_with_meta() {
+    let app = test_app();
+    let mut temp_dirs = Vec::new();
+
+    for index in 0..3 {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir_name = format!("Show {index} 2020 - [tmdbid-{}]", 9000 + index);
+        std::fs::create_dir(temp.path().join(dir_name)).expect("create source dir");
+
+        let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+        let payload = format!(
+            r#"{{"scan_id":"{}","idempotency_key":"list-job-{}","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":true}}"#,
+            scan_id,
+            index,
+            temp.path().display()
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/normalize/execute")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        temp_dirs.push(temp);
+    }
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/normalize/jobs?page=1&page_size=2")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = parse_json(list_response).await;
+    let jobs = list_body["data"]["jobs"].as_array().expect("jobs array");
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(list_body["data"]["pagination"]["page"], Value::from(1));
+    assert_eq!(list_body["data"]["pagination"]["page_size"], Value::from(2));
+    assert!(
+        list_body["data"]["pagination"]["total"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 3
+    );
+}
+
+#[tokio::test]
+async fn get_job_entries_returns_paginated_entries() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    for index in 0..3 {
+        let dir_name = format!("Series {index} 2022 - [tmdbid-{}]", 5000 + index);
+        std::fs::create_dir(temp.path().join(dir_name)).expect("create source dir");
+    }
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"entries-key","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":true}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job_id");
+
+    let entries_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/api/normalize/jobs/{job_id}/entries?page=1&page_size=2"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(entries_response.status(), StatusCode::OK);
+    let entries_body = parse_json(entries_response).await;
+    let entries = entries_body["data"]["entries"]
+        .as_array()
+        .expect("entries array");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries_body["data"]["pagination"]["page"], Value::from(1));
+    assert_eq!(
+        entries_body["data"]["pagination"]["page_size"],
+        Value::from(2)
+    );
+}
+
+#[tokio::test]
+async fn list_jobs_rejects_invalid_pagination_params() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/normalize/jobs?page=0&page_size=10")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = parse_json(response).await;
+    assert_eq!(body["success"], Value::Bool(false));
+    assert_eq!(
+        body["error"]["code"],
+        Value::String("invalid_request".to_string())
+    );
+}
+
+#[tokio::test]
+async fn post_execute_renames_trickplay_companion_directory_when_present() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_name = "Animal Control - 2023 [tvdbid-423022]";
+    let normalized_name = "Animal Control (2023)";
+
+    std::fs::create_dir(temp.path().join(source_name)).expect("create source dir");
+    std::fs::create_dir(temp.path().join(format!("{source_name}.trickplay")))
+        .expect("create trickplay companion dir");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"trickplay-key","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..200 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    assert!(temp.path().join(normalized_name).exists());
+
+    let final_status_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/normalize/jobs/{job_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(final_status_response.status(), StatusCode::OK);
+    let final_status_body = parse_json(final_status_response).await;
+    let entries = final_status_body["data"]["entries"]
+        .as_array()
+        .expect("entries array");
+    assert!(entries.iter().any(|entry| {
+        entry["source_path"].as_str().unwrap_or_default().ends_with(".trickplay")
+            && entry["status"] == Value::String("succeeded".to_string())
+    }));
 }
 
 #[tokio::test]

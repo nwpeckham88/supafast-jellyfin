@@ -187,6 +187,30 @@ async fn post_scan_returns_201_and_envelope() {
 }
 
 #[tokio::test]
+async fn post_scan_accepts_movie_media_type() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/scan")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"media_type":"movie","base_path":"/tmp"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = parse_json(response).await;
+    assert_eq!(
+        body["data"]["media_type"],
+        Value::String("movie".to_string())
+    );
+}
+
+#[tokio::test]
 async fn get_scan_returns_404_for_missing_scan() {
     let app = test_app();
 

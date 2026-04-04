@@ -47,4 +47,49 @@ describe('normalize page flow', () => {
     expect(state?.scanResult).not.toBeNull();
     expect(state?.error).toBeNull();
   });
+
+  it('recovers after a failed scan when retried', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({
+          success: false,
+          data: null,
+          error: { code: 'internal_error', message: 'temporary failure' }
+        })
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          success: true,
+          data: {
+            scan_id: 'scan-2',
+            media_type: 'tv',
+            groups: [],
+            summary: {
+              total_shows: 0,
+              total_episodes: 0,
+              merges: 0,
+              conflicts: 0
+            }
+          },
+          error: null
+        })
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    scanStore.setBasePath('/tmp');
+    await scanStore.startScan();
+    expect(get(scanStore)?.error).toBe('temporary failure');
+
+    await scanStore.startScan();
+    const state = get(scanStore);
+    expect(state?.error).toBeNull();
+    expect(state?.scanResult?.scan_id).toBe('scan-2');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

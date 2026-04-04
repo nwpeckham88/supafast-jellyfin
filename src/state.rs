@@ -21,7 +21,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig, scan_service: Arc<dyn ScanService>) -> Self {
-        let execute_repository: Arc<dyn ExecuteRepository> = Arc::new(InMemoryExecuteRepository::new());
+        let execute_repository: Arc<dyn ExecuteRepository> =
+            Arc::new(InMemoryExecuteRepository::new());
         let base_path_lock = Arc::new(BasePathLockManager::new());
 
         let execute_service: Arc<dyn ExecuteService> = Arc::new(InMemoryExecuteService::new(
@@ -30,8 +31,10 @@ impl AppState {
             base_path_lock.clone(),
         ));
 
-        let rollback_service: Arc<dyn RollbackService> =
-            Arc::new(InMemoryRollbackService::new(execute_repository, base_path_lock));
+        let rollback_service: Arc<dyn RollbackService> = Arc::new(InMemoryRollbackService::new(
+            execute_repository,
+            base_path_lock,
+        ));
 
         Self {
             config,

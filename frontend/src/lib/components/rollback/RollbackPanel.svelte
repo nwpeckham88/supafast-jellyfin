@@ -7,6 +7,9 @@
 
   interface Props {
     sessions: RollbackSessionSummary[];
+    sessionsPage: number;
+    sessionsTotalPages: number;
+    sessionsTotal: number;
     selectedSessionId: string;
     idempotencyKey: string;
     preview: RollbackPreviewResponse | null;
@@ -18,6 +21,8 @@
     onSelectSession: (value: string) => void;
     onIdempotencyKeyChange: (value: string) => void;
     onRefreshSessions: () => void;
+    onPreviousSessionsPage: () => void;
+    onNextSessionsPage: () => void;
     onLoadPreview: () => void;
     onDryRun: () => void;
     onExecute: () => void;
@@ -25,6 +30,9 @@
 
   let {
     sessions,
+    sessionsPage,
+    sessionsTotalPages,
+    sessionsTotal,
     selectedSessionId,
     idempotencyKey,
     preview,
@@ -36,6 +44,8 @@
     onSelectSession,
     onIdempotencyKeyChange,
     onRefreshSessions,
+    onPreviousSessionsPage,
+    onNextSessionsPage,
     onLoadPreview,
     onDryRun,
     onExecute
@@ -57,6 +67,26 @@
     >
       {loadingSessions ? 'Loading Sessions...' : 'Refresh Sessions'}
     </button>
+  </div>
+
+  <div class="mb-3 flex items-center gap-2 text-xs text-slate-700">
+    <button
+      class="rounded border border-slate-300 px-2 py-1"
+      disabled={loadingSessions || sessionsPage <= 1}
+      onclick={onPreviousSessionsPage}
+      type="button"
+    >
+      Prev
+    </button>
+    <button
+      class="rounded border border-slate-300 px-2 py-1"
+      disabled={loadingSessions || sessionsTotalPages === 0 || sessionsPage >= sessionsTotalPages}
+      onclick={onNextSessionsPage}
+      type="button"
+    >
+      Next
+    </button>
+    <span>Page {sessionsPage} of {sessionsTotalPages || 1} ({sessionsTotal} sessions)</span>
   </div>
 
   <div class="grid gap-4 md:grid-cols-2">
