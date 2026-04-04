@@ -50,12 +50,48 @@
   }: Props = $props();
 
   const progressPercent = $derived(totalOps > 0 ? Math.round((completedOps / totalOps) * 100) : 0);
+  const currentStatus = $derived(status ?? 'idle');
+  const statusBadgeClass = $derived.by(() => {
+    switch (currentStatus) {
+      case 'completed':
+        return 'bg-teal-100 text-teal-900 border-teal-300';
+      case 'running':
+        return 'bg-amber-100 text-amber-900 border-amber-300';
+      case 'failed':
+        return 'bg-red-100 text-red-900 border-red-300';
+      case 'pending':
+        return 'bg-indigo-100 text-indigo-900 border-indigo-300';
+      default:
+        return 'bg-slate-100 text-slate-700 border-slate-300';
+    }
+  });
+
+  function entryStatusClass(status: NormalizeAuditEntry['status']): string {
+    switch (status) {
+      case 'succeeded':
+        return 'bg-teal-100 text-teal-900 border-teal-300';
+      case 'running':
+        return 'bg-amber-100 text-amber-900 border-amber-300';
+      case 'failed':
+        return 'bg-red-100 text-red-900 border-red-300';
+      default:
+        return 'bg-slate-100 text-slate-700 border-slate-300';
+    }
+  }
 </script>
 
 <section class="glass fade-up rounded-2xl p-5 md:p-6">
   <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-    <h2 class="text-xl font-bold tracking-tight">Normalize Execute</h2>
+    <div>
+      <h2 class="text-xl font-bold tracking-tight">Normalize Execute</h2>
+      <p class="mt-1 text-xs text-slate-700">
+        Launch dry-runs or live execution with idempotent replay-safe requests.
+      </p>
+    </div>
     <div class="flex items-center gap-2 text-xs text-slate-700">
+      <span class={`rounded-full border px-2 py-0.5 font-semibold uppercase tracking-wide ${statusBadgeClass}`}>
+        {currentStatus}
+      </span>
       <span>Polling: {polling ? 'on' : 'off'}</span>
       <button
         class="rounded border border-slate-300 px-2 py-1"
@@ -81,6 +117,9 @@
       value={idempotencyKey}
     />
   </label>
+  <p class="mt-2 text-xs text-slate-600">
+    Reuse the same key to safely replay status without re-applying filesystem operations.
+  </p>
 
   <div class="mt-4 flex flex-wrap gap-2">
     <button
@@ -109,14 +148,23 @@
 
   <article class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
     <h3 class="text-sm font-semibold text-slate-900">Job Progress</h3>
-    <p class="mt-1 text-xs text-slate-700">
-      Job: {jobId || 'not started'} | Status: {status ?? 'idle'}
-    </p>
-    <p class="mt-1 text-xs text-slate-700">
-      Ops: {completedOps}/{totalOps} completed, {failedOps} failed ({progressPercent}%)
-    </p>
-    <div class="mt-2 h-2 w-full rounded bg-slate-200">
-      <div class="h-2 rounded bg-teal-600" style={`width: ${progressPercent}%`}></div>
+    <div class="mt-2 grid gap-2 text-xs text-slate-700 sm:grid-cols-2">
+      <p>Job ID: <span class="font-medium text-slate-900">{jobId || 'not started'}</span></p>
+      <p>
+        Completion: <span class="font-medium text-slate-900">{completedOps}/{totalOps}</span>
+        ({progressPercent}%)
+      </p>
+      <p>Failed Ops: <span class="font-medium text-slate-900">{failedOps}</span></p>
+      <p>
+        Remaining: <span class="font-medium text-slate-900">{Math.max(totalOps - completedOps, 0)}</span>
+      </p>
+    </div>
+
+    <div class="mt-3 h-2 w-full rounded bg-slate-200">
+      <div
+        class="h-2 rounded bg-gradient-to-r from-teal-500 to-cyan-500"
+        style={`width: ${progressPercent}%`}
+      ></div>
     </div>
   </article>
 
@@ -160,14 +208,21 @@
         <p class="text-xs text-slate-600">No operations loaded yet.</p>
       {:else}
         {#each entries as entry}
-          <div class="rounded border border-slate-200 p-2 text-xs">
-            <p class="font-semibold text-slate-900">
-              #{entry.op_index} {entry.op_type} [{entry.status}]
-            </p>
-            <p class="mt-1 text-slate-700">{entry.source_path}</p>
-            <p class="text-slate-500">to {entry.target_path}</p>
+          <div class="rounded-xl border border-slate-200 p-3 text-xs">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p class="font-semibold text-slate-900">
+                #{entry.op_index} {entry.op_type}
+              </p>
+              <span class={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${entryStatusClass(entry.status)}`}>
+                {entry.status}
+              </span>
+            </div>
+            <p class="mt-2 text-slate-700 break-all">{entry.source_path}</p>
+            <p class="text-slate-500 break-all">to {entry.target_path}</p>
             {#if entry.error_message}
-              <p class="mt-1 text-red-700">Error: {entry.error_message}</p>
+              <p class="mt-2 rounded-lg border border-red-200 bg-red-50 px-2 py-1 text-red-700">
+                Error: {entry.error_message}
+              </p>
             {/if}
           </div>
         {/each}
