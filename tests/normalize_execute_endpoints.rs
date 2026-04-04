@@ -339,3 +339,104 @@ async fn get_job_status_returns_created_job() {
     let status = job_body["data"]["status"].as_str().expect("status");
     assert!(matches!(status, "pending" | "running" | "completed"));
 }
+
+#[tokio::test]
+async fn post_execute_replays_with_canonical_equivalent_base_path() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(temp.path().join("Animaniacs 1993 - [tmdbid-82]"))
+        .expect("create source dir");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let base_a = temp.path().display().to_string();
+    let base_b = format!("{}/.", temp.path().display());
+
+    let first_payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"canonical-replay","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":true}}"#,
+        scan_id, base_a
+    );
+    let second_payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"canonical-replay","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":true}}"#,
+        scan_id, base_b
+    );
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(first_payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+
+    let second = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(second_payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(second.status(), StatusCode::ACCEPTED);
+    let second_body = parse_json(second).await;
+    assert_eq!(second_body["data"]["replayed"], Value::Bool(true));
+}
+
+#[tokio::test]
+async fn post_execute_rejects_second_active_job_for_same_base_path() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for index in 0..200 {
+        let name = format!("Show {} 2020 - [tmdbid-{}]", index, 1000 + index);
+        std::fs::create_dir(temp.path().join(name)).expect("create source dir");
+    }
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let first_payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"active-job-1","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display()
+    );
+    let second_payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"active-job-2","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(first_payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+
+    let second = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(second_payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+}

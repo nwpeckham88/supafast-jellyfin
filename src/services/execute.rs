@@ -520,6 +520,8 @@ fn compute_plan_hash(
 fn compute_request_fingerprint(
     request: &ExecuteNormalizeRequest,
 ) -> Result<String, ExecuteServiceError> {
+    let canonical_base_path = canonicalize_base_path(&request.base_path)?;
+
     let mut overrides = request
         .name_overrides
         .iter()
@@ -547,7 +549,7 @@ fn compute_request_fingerprint(
     let payload = serde_json::to_string(&(
         request.scan_id,
         request.media_type.as_str(),
-        request.base_path.as_str(),
+        canonical_base_path,
         request.dry_run,
         overrides,
         resolutions,
