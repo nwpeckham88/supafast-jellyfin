@@ -70,8 +70,8 @@
   }
 </script>
 
-<section class="glass fade-up rounded-2xl p-5 md:p-6">
-  <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+<section class="glass fade-up rounded-2xl p-4 sm:p-5 md:p-6">
+  <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
     <div>
       <h2 class="text-xl font-bold tracking-tight">Rollback Console</h2>
       <p class="mt-1 text-xs text-slate-700">
@@ -79,7 +79,7 @@
       </p>
     </div>
     <button
-      class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100"
+      class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100 sm:w-auto"
       disabled={loadingSessions || submitting}
       onclick={onRefreshSessions}
       type="button"
@@ -88,7 +88,7 @@
     </button>
   </div>
 
-  <div class="mb-3 flex items-center gap-2 text-xs text-slate-700">
+  <div class="mb-3 flex flex-wrap items-center gap-2 text-xs text-slate-700">
     <button
       class="rounded border border-slate-300 px-2 py-1"
       disabled={loadingSessions || sessionsPage <= 1}
@@ -105,7 +105,7 @@
     >
       Next
     </button>
-    <span>Page {sessionsPage} of {sessionsTotalPages || 1} ({sessionsTotal} sessions)</span>
+    <span class="w-full text-[11px] sm:w-auto sm:text-xs">Page {sessionsPage} of {sessionsTotalPages || 1} ({sessionsTotal} sessions)</span>
   </div>
 
   <div class="grid gap-4 md:grid-cols-2">
@@ -142,7 +142,7 @@
   </div>
 
   {#if selectedSession}
-    <article class="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+    <article class="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-700 sm:text-xs">
       <div class="flex flex-wrap items-center gap-2">
         <span class={`rounded-full border px-2 py-0.5 font-semibold uppercase tracking-wide ${sessionStatusClass(selectedSession.status)}`}>
           {selectedSession.status}
@@ -158,7 +158,7 @@
 
   <div class="mt-4 flex flex-wrap gap-2">
     <button
-      class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100"
+      class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100 sm:w-auto"
       disabled={!selectedSessionId || loadingPreview || submitting}
       onclick={onLoadPreview}
       type="button"
@@ -166,7 +166,7 @@
       {loadingPreview ? 'Building Preview...' : 'Load Preview'}
     </button>
     <button
-      class="rounded-lg border border-amber-400 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+      class="w-full rounded-lg border border-amber-400 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100 sm:w-auto"
       disabled={!preview || submitting}
       onclick={onDryRun}
       type="button"
@@ -174,7 +174,7 @@
       Dry Run Execute
     </button>
     <button
-      class="rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800"
+      class="w-full rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800 sm:w-auto"
       disabled={!preview || submitting}
       onclick={onExecute}
       type="button"
@@ -190,9 +190,9 @@
   {/if}
 
   {#if preview}
-    <article class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+    <article class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4">
       <h3 class="text-sm font-semibold text-slate-900">Rollback Preview</h3>
-      <div class="mt-2 grid gap-2 text-xs text-slate-700 sm:grid-cols-3">
+      <div class="mt-2 grid gap-2 text-[11px] text-slate-700 sm:grid-cols-3 sm:text-xs">
         <p>
           Total: <span class="font-semibold text-slate-900">{preview.operation_count}</span>
         </p>
@@ -204,10 +204,10 @@
         </p>
       </div>
 
-      <div class="mt-3 max-h-56 space-y-2 overflow-auto rounded-lg border border-slate-200 bg-white p-3">
+      <div class="mt-3 max-h-72 space-y-2 overflow-auto rounded-lg border border-slate-200 bg-white p-2 sm:max-h-56 sm:p-3">
         {#each preview.operations as operation}
           <div
-            class="rounded-lg border p-2 text-xs"
+            class="rounded-lg border p-2 text-[11px] sm:text-xs"
             class:border-red-200={Boolean(operation.blocked_reason)}
             class:bg-red-50={Boolean(operation.blocked_reason)}
             class:border-slate-200={!operation.blocked_reason}

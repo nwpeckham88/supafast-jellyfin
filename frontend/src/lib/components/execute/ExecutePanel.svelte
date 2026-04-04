@@ -80,21 +80,21 @@
   }
 </script>
 
-<section class="glass fade-up rounded-2xl p-5 md:p-6">
-  <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+<section class="glass fade-up rounded-2xl p-4 sm:p-5 md:p-6">
+  <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
     <div>
       <h2 class="text-xl font-bold tracking-tight">Normalize Execute</h2>
       <p class="mt-1 text-xs text-slate-700">
         Launch dry-runs or live execution with idempotent replay-safe requests.
       </p>
     </div>
-    <div class="flex items-center gap-2 text-xs text-slate-700">
+    <div class="flex w-full flex-wrap items-center gap-2 text-xs text-slate-700 sm:w-auto sm:justify-end">
       <span class={`rounded-full border px-2 py-0.5 font-semibold uppercase tracking-wide ${statusBadgeClass}`}>
         {currentStatus}
       </span>
       <span>Polling: {polling ? 'on' : 'off'}</span>
       <button
-        class="rounded border border-slate-300 px-2 py-1"
+        class="rounded border border-slate-300 px-2 py-1 sm:px-2"
         disabled={!jobId || submitting}
         onclick={onRefreshStatus}
         type="button"
@@ -123,7 +123,7 @@
 
   <div class="mt-4 flex flex-wrap gap-2">
     <button
-      class="rounded-lg border border-amber-400 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+      class="w-full rounded-lg border border-amber-400 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100 sm:w-auto"
       disabled={submitting}
       onclick={onDryRun}
       type="button"
@@ -131,7 +131,7 @@
       Start Dry Run
     </button>
     <button
-      class="rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800"
+      class="w-full rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800 sm:w-auto"
       disabled={submitting}
       onclick={onExecute}
       type="button"
@@ -146,9 +146,9 @@
     </aside>
   {/if}
 
-  <article class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+  <article class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4">
     <h3 class="text-sm font-semibold text-slate-900">Job Progress</h3>
-    <div class="mt-2 grid gap-2 text-xs text-slate-700 sm:grid-cols-2">
+    <div class="mt-2 grid gap-2 text-[11px] text-slate-700 sm:grid-cols-2 sm:text-xs">
       <p>Job ID: <span class="font-medium text-slate-900">{jobId || 'not started'}</span></p>
       <p>
         Completion: <span class="font-medium text-slate-900">{completedOps}/{totalOps}</span>
@@ -168,12 +168,12 @@
     </div>
   </article>
 
-  <article class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
-    <div class="flex items-center justify-between gap-3">
+  <article class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4">
+    <div class="flex flex-wrap items-center justify-between gap-3">
       <h3 class="text-sm font-semibold text-slate-900">Operations</h3>
-      <div class="flex items-center gap-2 text-xs text-slate-700">
+      <div class="flex w-full items-center gap-2 text-xs text-slate-700 sm:w-auto sm:justify-end">
         <button
-          class="rounded border border-slate-300 px-2 py-1"
+          class="w-full rounded border border-slate-300 px-2 py-1 sm:w-auto"
           disabled={!jobId || loadingEntries}
           onclick={onRefreshEntries}
           type="button"
@@ -183,7 +183,7 @@
       </div>
     </div>
 
-    <div class="mt-2 flex items-center gap-2 text-xs text-slate-700">
+    <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-700">
       <button
         class="rounded border border-slate-300 px-2 py-1"
         disabled={loadingEntries || entriesPage <= 1}
@@ -200,15 +200,15 @@
       >
         Next
       </button>
-      <span>Page {entriesPage} of {entriesTotalPages || 1} ({entriesTotal} ops)</span>
+      <span class="w-full text-[11px] sm:w-auto sm:text-xs">Page {entriesPage} of {entriesTotalPages || 1} ({entriesTotal} ops)</span>
     </div>
 
-    <div class="mt-3 max-h-64 space-y-2 overflow-auto rounded-lg border border-slate-200 bg-white p-3">
+    <div class="mt-3 max-h-72 space-y-2 overflow-auto rounded-lg border border-slate-200 bg-white p-2 sm:max-h-64 sm:p-3">
       {#if !entries.length}
         <p class="text-xs text-slate-600">No operations loaded yet.</p>
       {:else}
         {#each entries as entry}
-          <div class="rounded-xl border border-slate-200 p-3 text-xs">
+          <div class="rounded-xl border border-slate-200 p-2 text-[11px] sm:p-3 sm:text-xs">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <p class="font-semibold text-slate-900">
                 #{entry.op_index} {entry.op_type}
