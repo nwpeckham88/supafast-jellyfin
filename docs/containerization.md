@@ -14,10 +14,23 @@ Copy the template and adjust values if needed:
 cp .env.docker.example .env
 ```
 
-Optional host paths used by the backend container:
+Set container user IDs to your host user (prevents root-owned files on mounted paths):
 
-- `TV_BASE_PATH_HOST` (default: `./tmp/tv`)
-- `MOVIES_BASE_PATH_HOST` (default: `./tmp/movies`)
+```bash
+echo "APP_UID=$(id -u)" >> .env
+echo "APP_GID=$(id -g)" >> .env
+```
+
+Create media/log paths once (simple single-root mapping):
+
+```bash
+mkdir -p ./tmp/media/tv ./tmp/media/movies ./tmp/logs
+```
+
+Optional mapping variables:
+
+- `MEDIA_LIBRARY_HOST_ROOT` (default: `./tmp/media`)
+- `AUDIT_LOG_HOST_PATH` (default: `./tmp/logs`)
 
 ## 2. Build and run
 
@@ -48,4 +61,5 @@ docker compose down -v
 
 - Backend bind address is configurable via `HOST` (default `127.0.0.1`) and `PORT`.
 - `PUBLIC_API_BASE_URL` is a frontend build-time env; rebuild frontend container after changes.
+- Frontend container proxy uses `VITE_API_PROXY_TARGET` (default `http://backend:3001`) so `/api/*` calls work inside Docker networking.
 - Migrations are applied by the Postgres image only on first initialization of an empty data volume.

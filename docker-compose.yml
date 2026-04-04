@@ -22,6 +22,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     restart: unless-stopped
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -33,13 +34,12 @@ services:
       FOLLOW_SYMLINKS: ${FOLLOW_SYMLINKS:-false}
       TV_BASE_PATH: ${TV_BASE_PATH:-/media/tv}
       MOVIES_BASE_PATH: ${MOVIES_BASE_PATH:-/media/movies}
-      AUDIT_LOG_DIR: ${AUDIT_LOG_DIR:-/var/log/supafast-jellyfin}
+      AUDIT_LOG_DIR: ${AUDIT_LOG_DIR:-/app/logs}
     ports:
       - "127.0.0.1:3001:3001"
     volumes:
-      - ./tmp/logs:/var/log/supafast-jellyfin
-      - ${TV_BASE_PATH_HOST:-./tmp/tv}:/media/tv
-      - ${MOVIES_BASE_PATH_HOST:-./tmp/movies}:/media/movies
+      - ${AUDIT_LOG_HOST_PATH:-./tmp/logs}:/app/logs
+      - ${MEDIA_LIBRARY_HOST_ROOT:-./tmp/media}:/media
 
   frontend:
     build:
@@ -50,6 +50,8 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      VITE_API_PROXY_TARGET: ${VITE_API_PROXY_TARGET:-http://backend:3001}
     ports:
       - "127.0.0.1:3000:3000"
 
