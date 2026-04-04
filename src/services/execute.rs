@@ -7,7 +7,6 @@ use std::{
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
@@ -21,7 +20,7 @@ use crate::{
         scan::ScanResult,
     },
     repositories::execute_repo::{ClaimJobResult, ExecuteRepository, ExecuteRepositoryError, JobRecord},
-    safety::path_guard,
+    safety::{base_path_lock::BasePathLockManager, path_guard},
     services::scan::ScanService,
 };
 
@@ -55,15 +54,19 @@ pub trait ExecuteService: Send + Sync {
 pub struct InMemoryExecuteService {
     scan_service: Arc<dyn ScanService>,
     repository: Arc<dyn ExecuteRepository>,
-    active_base_paths: Arc<Mutex<HashSet<String>>>,
+    base_path_lock: Arc<BasePathLockManager>,
 }
 
 impl InMemoryExecuteService {
-    pub fn new(scan_service: Arc<dyn ScanService>, repository: Arc<dyn ExecuteRepository>) -> Self {
+    pub fn new(
+        scan_service: Arc<dyn ScanService>,
+        repository: Arc<dyn ExecuteRepository>,
+        base_path_lock: Arc<BasePathLockManager>,
+    ) -> Self {
         Self {
             scan_service,
             repository,
-            active_base_paths: Arc::new(Mutex::new(HashSet::new())),
+            base_path_lock,
         }
     }
 }
@@ -115,11 +118,8 @@ impl ExecuteService for InMemoryExecuteService {
         let plan = build_plan(&scan, &request)?;
         preflight_validate(&plan, request.dry_run)?;
 
-        {
-            let mut active = self.active_base_paths.lock().await;
-            if !active.insert(canonical_request_base.clone()) {
-                return Err(ExecuteServiceError::Preflight);
-            }
+        if !self.base_path_lock.try_acquire(&canonical_request_base).await {
+            return Err(ExecuteServiceError::Preflight);
         }
 
         let job_id = Uuid::new_v4();
@@ -155,18 +155,18 @@ impl ExecuteService for InMemoryExecuteService {
         let claimed = match self.repository.claim_job(pending_job.clone()).await {
             Ok(result) => result,
             Err(error) => {
-                release_active_base(&self.active_base_paths, &canonical_request_base).await;
+                self.base_path_lock.release(&canonical_request_base).await;
                 return Err(map_repo_error(error));
             }
         };
 
         match claimed {
             ClaimJobResult::Conflict => {
-                release_active_base(&self.active_base_paths, &canonical_request_base).await;
+                self.base_path_lock.release(&canonical_request_base).await;
                 Err(ExecuteServiceError::IdempotencyConflict)
             }
             ClaimJobResult::Replayed(existing) => {
-                release_active_base(&self.active_base_paths, &canonical_request_base).await;
+                self.base_path_lock.release(&canonical_request_base).await;
                 Ok(ExecuteNormalizeResponse {
                     job_id: existing.job_id,
                     scan_id: existing.scan_id,
@@ -177,10 +177,10 @@ impl ExecuteService for InMemoryExecuteService {
             ClaimJobResult::Created(created) => {
                 let repository = self.repository.clone();
                 let dry_run = request.dry_run;
-                let active_base_paths = self.active_base_paths.clone();
+                let base_path_lock = self.base_path_lock.clone();
                 let base_key = canonical_request_base.clone();
                 tokio::spawn(async move {
-                    run_job(repository, created, dry_run, active_base_paths, base_key).await;
+                    run_job(repository, created, dry_run, base_path_lock, base_key).await;
                 });
 
                 Ok(ExecuteNormalizeResponse {
@@ -231,12 +231,12 @@ async fn run_job(
     repository: Arc<dyn ExecuteRepository>,
     mut job: JobRecord,
     dry_run: bool,
-    active_base_paths: Arc<Mutex<HashSet<String>>>,
+    base_path_lock: Arc<BasePathLockManager>,
     base_key: String,
 ) {
     job.status = NormalizeJobStatus::Running;
     if repository.update_job(job.clone()).await.is_err() {
-        release_active_base(&active_base_paths, &base_key).await;
+        base_path_lock.release(&base_key).await;
         return;
     }
 
@@ -246,7 +246,7 @@ async fn run_job(
             job.status = NormalizeJobStatus::Failed;
             job.error = Some("failed to resolve base path".to_string());
             let _ = repository.update_job(job).await;
-            release_active_base(&active_base_paths, &base_key).await;
+            base_path_lock.release(&base_key).await;
             return;
         }
     };
@@ -270,7 +270,7 @@ async fn run_job(
             job.status = NormalizeJobStatus::Failed;
             job.error = Some("operation failed safety revalidation".to_string());
             let _ = repository.update_job(job).await;
-            release_active_base(&active_base_paths, &base_key).await;
+            base_path_lock.release(&base_key).await;
             return;
         }
 
@@ -287,7 +287,7 @@ async fn run_job(
                 job.status = NormalizeJobStatus::Failed;
                 job.error = Some("filesystem operation failed".to_string());
                 let _ = repository.update_job(job).await;
-                release_active_base(&active_base_paths, &base_key).await;
+                base_path_lock.release(&base_key).await;
                 return;
             }
         }
@@ -295,7 +295,7 @@ async fn run_job(
 
     job.status = NormalizeJobStatus::Completed;
     let _ = repository.update_job(job).await;
-    release_active_base(&active_base_paths, &base_key).await;
+    base_path_lock.release(&base_key).await;
 }
 
 fn build_plan(
@@ -572,7 +572,3 @@ fn canonicalize_base_path(path: &str) -> Result<String, ExecuteServiceError> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
-async fn release_active_base(active_base_paths: &Mutex<HashSet<String>>, base_key: &str) {
-    let mut active = active_base_paths.lock().await;
-    active.remove(base_key);
-}

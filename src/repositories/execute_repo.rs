@@ -45,6 +45,8 @@ pub trait ExecuteRepository: Send + Sync {
 
     async fn get_job(&self, job_id: Uuid) -> Result<Option<JobRecord>, ExecuteRepositoryError>;
 
+    async fn list_jobs(&self) -> Result<Vec<JobRecord>, ExecuteRepositoryError>;
+
     async fn update_job(&self, record: JobRecord) -> Result<(), ExecuteRepositoryError>;
 }
 
@@ -118,6 +120,15 @@ impl ExecuteRepository for InMemoryExecuteRepository {
             .read()
             .map_err(|_| ExecuteRepositoryError::LockPoisoned)?;
         Ok(guard.jobs_by_id.get(&job_id).cloned())
+    }
+
+    async fn list_jobs(&self) -> Result<Vec<JobRecord>, ExecuteRepositoryError> {
+        let guard = self
+            .state
+            .read()
+            .map_err(|_| ExecuteRepositoryError::LockPoisoned)?;
+
+        Ok(guard.jobs_by_id.values().cloned().collect())
     }
 
     async fn update_job(&self, record: JobRecord) -> Result<(), ExecuteRepositoryError> {

@@ -3,15 +3,18 @@
 
   import ConflictPanel from '$lib/components/conflicts/ConflictPanel.svelte';
   import PreviewTree from '$lib/components/preview/PreviewTree.svelte';
+  import RollbackPanel from '$lib/components/rollback/RollbackPanel.svelte';
   import ScanRequestForm from '$lib/components/scan/ScanRequestForm.svelte';
   import ScanSummaryCard from '$lib/components/scan/ScanSummaryCard.svelte';
   import { conflictsStore } from '$lib/stores/conflicts';
+  import { rollbackStore } from '$lib/stores/rollback';
   import { scanStore } from '$lib/stores/scan';
 
   const conflictItems = conflictsStore.items;
   const conflictSelections = conflictsStore.selections;
   const unresolvedCount = conflictsStore.unresolvedCount;
   let lastSeededResult: ScanResult | null | undefined = undefined;
+  let rollbackSessionsLoaded = false;
 
   $effect(() => {
     const result = $scanStore.scanResult;
@@ -22,6 +25,15 @@
     lastSeededResult = result;
     conflictsStore.seedFromScan(result);
   });
+
+  $effect(() => {
+    if (rollbackSessionsLoaded) {
+      return;
+    }
+
+    rollbackSessionsLoaded = true;
+    void rollbackStore.refreshSessions();
+  });
 </script>
 
 <svelte:head>
@@ -31,7 +43,7 @@
 <section class="mb-6">
   <h1 class="text-3xl font-bold tracking-tight">Normalize Scan Preview</h1>
   <p class="mt-2 text-sm text-slate-700">
-    Review normalized groupings and mock conflict choices before execute endpoints land in Phase 3.
+    Phase 4 includes scan preview, execute, and rollback session tooling in one workflow.
   </p>
 </section>
 
@@ -84,4 +96,28 @@
     onChoose={(conflictId, candidateId) => conflictsStore.choose(conflictId, candidateId)}
     onReset={() => conflictsStore.reset()}
   />
+
+  <RollbackPanel
+    sessions={$rollbackStore.sessions}
+    selectedSessionId={$rollbackStore.selectedSessionId}
+    idempotencyKey={$rollbackStore.idempotencyKey}
+    preview={$rollbackStore.preview}
+    result={$rollbackStore.result}
+    loadingSessions={$rollbackStore.loadingSessions}
+    loadingPreview={$rollbackStore.loadingPreview}
+    submitting={$rollbackStore.submitting}
+    error={$rollbackStore.error}
+    onSelectSession={(value) => rollbackStore.setSelectedSession(value)}
+    onIdempotencyKeyChange={(value) => rollbackStore.setIdempotencyKey(value)}
+    onRefreshSessions={() => rollbackStore.refreshSessions()}
+    onLoadPreview={() => rollbackStore.loadPreview()}
+    onDryRun={() => rollbackStore.runRollback(true)}
+    onExecute={() => rollbackStore.runRollback(false)}
+  />
 </div>
+
+{#if !$rollbackStore.sessions.length}
+  <section class="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+    No rollback sessions yet. Run normalize execute first, then refresh rollback sessions.
+  </section>
+{/if}
