@@ -3,7 +3,6 @@ import type {
   ExecuteNormalizeRequest,
   ExecuteNormalizeResponse,
   ExpireScanResult,
-  ScanDefaults,
   NormalizeJobEntriesResponse,
   NormalizeJobStatusResponse,
   RollbackExecuteRequest,
@@ -20,10 +19,6 @@ export function createScan(payload: CreateScanPayload): Promise<ScanResult> {
     method: 'POST',
     body: JSON.stringify(payload)
   });
-}
-
-export function getScanDefaults(): Promise<ScanDefaults> {
-  return request<ScanDefaults>('/api/normalize/config');
 }
 
 export function getScan(scanId: string): Promise<ScanResult> {

@@ -14,6 +14,10 @@ use supafast_jellyfin::telemetry::logging;
 async fn main() -> anyhow::Result<()> {
     logging::init();
     let config = AppConfig::from_env()?;
+    config.log_startup_diagnostics();
+    config.validate_startup_paths()?;
+    tracing::info!("startup path validation passed");
+
     let scan_repository: Arc<dyn ScanRepository> = match config.database_url.as_deref() {
         Some(database_url) => {
             let pool = connect_pg_pool(database_url).await?;

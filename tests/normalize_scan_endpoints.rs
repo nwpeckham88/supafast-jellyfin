@@ -199,6 +199,7 @@ async fn post_scan_returns_201_and_envelope() {
     assert!(body["data"].is_object());
     assert!(body["data"]["scan_id"].as_str().is_some());
     assert_eq!(body["data"]["media_type"], Value::String("tv".to_string()));
+    assert_eq!(body["data"]["base_path"], Value::String("/tmp".to_string()));
 }
 
 #[tokio::test]
@@ -222,6 +223,45 @@ async fn post_scan_accepts_movie_media_type() {
     assert_eq!(
         body["data"]["media_type"],
         Value::String("movie".to_string())
+    );
+    assert_eq!(body["data"]["base_path"], Value::String("/tmp".to_string()));
+}
+
+#[tokio::test]
+async fn accepts_base_path_override_within_configured_media_root() {
+    let temp = tempdir().expect("temp dir");
+    let tv_root = temp.path().join("tv");
+    let allowed_override = tv_root.join("seasonal");
+    std::fs::create_dir_all(&allowed_override).expect("create override path");
+    let app = test_app_with_media_roots(
+        60,
+        Arc::new(InMemoryScanService::new()) as Arc<dyn ScanService>,
+        tv_root.clone(),
+        tv_root,
+    );
+
+    let request_body = format!(
+        r#"{{"media_type":"tv","base_path":"{}"}}"#,
+        allowed_override.display()
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/scan")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = parse_json(response).await;
+    assert_eq!(
+        body["data"]["base_path"],
+        Value::String(allowed_override.to_string_lossy().to_string())
     );
 }
 

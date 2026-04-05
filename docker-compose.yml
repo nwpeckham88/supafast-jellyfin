@@ -39,8 +39,8 @@ services:
       - "127.0.0.1:3001:3001"
     volumes:
       - ${AUDIT_LOG_HOST_PATH:-./tmp/logs}:/app/logs
-      - ${TV_LIBRARY_HOST_PATH:-./tmp/media/tv}:${TV_BASE_PATH:-/media/tv}
-      - ${MOVIES_LIBRARY_HOST_PATH:-./tmp/media/movies}:${MOVIES_BASE_PATH:-/media/movies}
+      - ${TV_LIBRARY_HOST_PATH:-/mnt/nas/servarr/data/media/tv}:${TV_BASE_PATH:-/media/tv}
+      - ${MOVIES_LIBRARY_HOST_PATH:-/mnt/nas/servarr/data/media/movies}:${MOVIES_BASE_PATH:-/media/movies}
 
   frontend:
     build:
@@ -54,7 +54,7 @@ services:
     environment:
       VITE_API_PROXY_TARGET: ${VITE_API_PROXY_TARGET:-http://backend:3001}
     ports:
-      - "127.0.0.1:3000:3000"
+      - "3377:3000"
 
 volumes:
   postgres_data:

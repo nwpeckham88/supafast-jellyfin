@@ -1,4 +1,9 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    fs::{self, OpenOptions},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::error::AppError;
 
@@ -35,6 +40,129 @@ impl AppConfig {
             scan_ttl_minutes: parse_u64("SCAN_TTL_MINUTES", 60)?,
             follow_symlinks: parse_bool("FOLLOW_SYMLINKS", false)?,
         })
+    }
+
+    pub fn log_startup_diagnostics(&self) {
+        tracing::info!(
+            host = %self.host,
+            port = self.port,
+            scan_ttl_minutes = self.scan_ttl_minutes,
+            follow_symlinks = self.follow_symlinks,
+            tv_base_path = %self.tv_base_path.display(),
+            movies_base_path = %self.movies_base_path.display(),
+            audit_log_dir = %self.audit_log_dir.display(),
+            database_url_set = self.database_url.is_some(),
+            database_url = %mask_database_url(self.database_url.as_deref()),
+            host_source = %env_source("HOST"),
+            port_source = %env_source("PORT"),
+            tv_base_path_source = %env_source("TV_BASE_PATH"),
+            movies_base_path_source = %env_source("MOVIES_BASE_PATH"),
+            audit_log_dir_source = %env_source("AUDIT_LOG_DIR"),
+            database_url_source = %env_source("DATABASE_URL"),
+            "startup configuration diagnostics"
+        );
+    }
+
+    pub fn validate_startup_paths(&self) -> Result<(), AppError> {
+        validate_path_access("TV_BASE_PATH", &self.tv_base_path, false)?;
+        if let Err(error) = assert_directory_writable("TV_BASE_PATH", &self.tv_base_path) {
+            tracing::warn!(
+                error = %error,
+                path = %self.tv_base_path.display(),
+                "TV_BASE_PATH is readable but not writable; execute/rollback operations may fail"
+            );
+        }
+
+        validate_path_access("MOVIES_BASE_PATH", &self.movies_base_path, false)?;
+        if let Err(error) = assert_directory_writable("MOVIES_BASE_PATH", &self.movies_base_path)
+        {
+            tracing::warn!(
+                error = %error,
+                path = %self.movies_base_path.display(),
+                "MOVIES_BASE_PATH is readable but not writable; execute/rollback operations may fail"
+            );
+        }
+
+        validate_path_access("AUDIT_LOG_DIR", &self.audit_log_dir, true)?;
+        Ok(())
+    }
+}
+
+fn env_source(key: &'static str) -> &'static str {
+    if env::var_os(key).is_some() {
+        "env"
+    } else {
+        "default"
+    }
+}
+
+fn validate_path_access(
+    key: &'static str,
+    path: &Path,
+    require_write: bool,
+) -> Result<(), AppError> {
+    let metadata = fs::metadata(path).map_err(|error| AppError::StartupValidation {
+        key,
+        message: format!("{} is not accessible: {error}", path.display()),
+    })?;
+
+    if !metadata.is_dir() {
+        return Err(AppError::StartupValidation {
+            key,
+            message: format!("{} is not a directory", path.display()),
+        });
+    }
+
+    fs::read_dir(path).map_err(|error| AppError::StartupValidation {
+        key,
+        message: format!("{} is not readable: {error}", path.display()),
+    })?;
+
+    if require_write {
+        assert_directory_writable(key, path)?;
+    }
+
+    Ok(())
+}
+
+fn assert_directory_writable(key: &'static str, dir: &Path) -> Result<(), AppError> {
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let probe = dir.join(format!(".supafast_write_probe_{pid}_{nanos}"));
+
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+        .map_err(|error| AppError::StartupValidation {
+            key,
+            message: format!("{} is not writable: {error}", dir.display()),
+        })?;
+
+    fs::remove_file(&probe).map_err(|error| AppError::StartupValidation {
+        key,
+        message: format!(
+            "{} probe cleanup failed after write test ({}): {error}",
+            dir.display(),
+            probe.display()
+        ),
+    })?;
+
+    Ok(())
+}
+
+fn mask_database_url(value: Option<&str>) -> String {
+    match value {
+        Some(raw) if !raw.trim().is_empty() => {
+            if let Some((scheme, _rest)) = raw.split_once("://") {
+                return format!("{scheme}://***");
+            }
+            "***".to_string()
+        }
+        _ => "not_set".to_string(),
     }
 }
 
@@ -133,5 +261,185 @@ mod tests {
             let result = AppConfig::from_env();
             assert!(result.is_err());
         });
+    }
+
+    #[test]
+    fn validates_startup_paths_when_directories_are_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tv = temp.path().join("tv");
+        let movies = temp.path().join("movies");
+        let logs = temp.path().join("logs");
+        std::fs::create_dir_all(&tv).expect("tv dir");
+        std::fs::create_dir_all(&movies).expect("movies dir");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        with_env_overrides(
+            &[
+                ("TV_BASE_PATH", Some(tv.to_str().expect("tv path"))),
+                ("MOVIES_BASE_PATH", Some(movies.to_str().expect("movies path"))),
+                ("AUDIT_LOG_DIR", Some(logs.to_str().expect("logs path"))),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("config from env");
+                assert!(config.validate_startup_paths().is_ok());
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_nonexistent_media_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing_tv = temp.path().join("missing-tv");
+        let movies = temp.path().join("movies");
+        let logs = temp.path().join("logs");
+        std::fs::create_dir_all(&movies).expect("movies dir");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        with_env_overrides(
+            &[
+                (
+                    "TV_BASE_PATH",
+                    Some(missing_tv.to_str().expect("missing tv path")),
+                ),
+                ("MOVIES_BASE_PATH", Some(movies.to_str().expect("movies path"))),
+                ("AUDIT_LOG_DIR", Some(logs.to_str().expect("logs path"))),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("config from env");
+                let error = config
+                    .validate_startup_paths()
+                    .expect_err("expected startup validation failure");
+                assert!(error.to_string().contains("TV_BASE_PATH"));
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_path_when_not_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tv_file = temp.path().join("tv-file");
+        let movies = temp.path().join("movies");
+        let logs = temp.path().join("logs");
+        std::fs::write(&tv_file, "not-a-dir").expect("tv file");
+        std::fs::create_dir_all(&movies).expect("movies dir");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        with_env_overrides(
+            &[
+                ("TV_BASE_PATH", Some(tv_file.to_str().expect("tv file path"))),
+                ("MOVIES_BASE_PATH", Some(movies.to_str().expect("movies path"))),
+                ("AUDIT_LOG_DIR", Some(logs.to_str().expect("logs path"))),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("config from env");
+                let error = config
+                    .validate_startup_paths()
+                    .expect_err("expected startup validation failure");
+                assert!(error.to_string().contains("not a directory"));
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_writable_audit_log_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tv = temp.path().join("tv");
+        let movies = temp.path().join("movies");
+        let logs = temp.path().join("logs");
+        std::fs::create_dir_all(&tv).expect("tv dir");
+        std::fs::create_dir_all(&movies).expect("movies dir");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        let original_permissions = std::fs::metadata(&logs)
+            .expect("logs metadata")
+            .permissions();
+        let mut read_only = original_permissions.clone();
+        read_only.set_mode(0o555);
+        std::fs::set_permissions(&logs, read_only).expect("set logs permissions");
+
+        // Some CI/container filesystems can still permit writes even after chmod(0555).
+        // If that happens, skip instead of producing a flaky failure.
+        if super::assert_directory_writable("AUDIT_LOG_DIR", &logs).is_ok() {
+            std::fs::set_permissions(&logs, original_permissions).expect("restore logs permissions");
+            return;
+        }
+
+        with_env_overrides(
+            &[
+                ("TV_BASE_PATH", Some(tv.to_str().expect("tv path"))),
+                ("MOVIES_BASE_PATH", Some(movies.to_str().expect("movies path"))),
+                ("AUDIT_LOG_DIR", Some(logs.to_str().expect("logs path"))),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("config from env");
+                let error = config
+                    .validate_startup_paths()
+                    .expect_err("expected startup validation failure");
+                assert!(error.to_string().contains("AUDIT_LOG_DIR"));
+                assert!(error.to_string().contains("not writable"));
+            },
+        );
+
+        std::fs::set_permissions(&logs, original_permissions).expect("restore logs permissions");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_read_only_media_paths_when_audit_log_dir_is_writable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tv = temp.path().join("tv");
+        let movies = temp.path().join("movies");
+        let logs = temp.path().join("logs");
+        std::fs::create_dir_all(&tv).expect("tv dir");
+        std::fs::create_dir_all(&movies).expect("movies dir");
+        std::fs::create_dir_all(&logs).expect("logs dir");
+
+        let tv_original_permissions = std::fs::metadata(&tv)
+            .expect("tv metadata")
+            .permissions();
+        let movies_original_permissions = std::fs::metadata(&movies)
+            .expect("movies metadata")
+            .permissions();
+
+        let mut read_only = tv_original_permissions.clone();
+        read_only.set_mode(0o555);
+        std::fs::set_permissions(&tv, read_only.clone()).expect("set tv permissions");
+        std::fs::set_permissions(&movies, read_only).expect("set movies permissions");
+
+        with_env_overrides(
+            &[
+                ("TV_BASE_PATH", Some(tv.to_str().expect("tv path"))),
+                ("MOVIES_BASE_PATH", Some(movies.to_str().expect("movies path"))),
+                ("AUDIT_LOG_DIR", Some(logs.to_str().expect("logs path"))),
+            ],
+            || {
+                let config = AppConfig::from_env().expect("config from env");
+                assert!(config.validate_startup_paths().is_ok());
+            },
+        );
+
+        std::fs::set_permissions(&tv, tv_original_permissions).expect("restore tv permissions");
+        std::fs::set_permissions(&movies, movies_original_permissions)
+            .expect("restore movies permissions");
+    }
+
+    #[test]
+    fn masks_database_url_credentials_in_diagnostics() {
+        let masked = super::mask_database_url(Some(
+            "postgres://supafast:super-secret@db.internal:5432/supafast_jellyfin",
+        ));
+        assert_eq!(masked, "postgres://***");
+        assert!(!masked.contains("super-secret"));
+    }
+
+    #[test]
+    fn reports_database_url_as_not_set_when_missing() {
+        let masked = super::mask_database_url(None);
+        assert_eq!(masked, "not_set");
     }
 }

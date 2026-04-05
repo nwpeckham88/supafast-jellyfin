@@ -8,4 +8,9 @@ pub enum AppError {
     InvalidConfigValue { key: &'static str, value: String },
     #[error("invalid boolean config value for {key}: {value}")]
     InvalidBooleanConfigValue { key: &'static str, value: String },
+    #[error("startup validation failed for {key}: {message}")]
+    StartupValidation {
+        key: &'static str,
+        message: String,
+    },
 }

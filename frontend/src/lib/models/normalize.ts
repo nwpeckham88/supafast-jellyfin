@@ -24,11 +24,6 @@ export interface CreateScanPayload {
   media_type: MediaType;
 }
 
-export interface ScanDefaults {
-  tv_base_path: string;
-  movies_base_path: string;
-}
-
 export interface ExpireScanResult {
   scan_id: string;
   expired: boolean;
