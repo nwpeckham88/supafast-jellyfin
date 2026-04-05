@@ -24,7 +24,7 @@ pub struct ScanDefaultsResponse {
 #[derive(Debug, Deserialize)]
 pub struct CreateScanRequest {
     pub media_type: String,
-    pub base_path: String,
+    pub base_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,17 +81,6 @@ async fn create_scan(
             .into_response();
     }
 
-    if payload.base_path.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::<serde_json::Value>::failure(
-                "invalid_request",
-                "base_path must not be empty",
-            )),
-        )
-            .into_response();
-    }
-
     let allowed_root = match payload.media_type.as_str() {
         "tv" => &state.config.tv_base_path,
         "movie" => &state.config.movies_base_path,
@@ -107,7 +96,22 @@ async fn create_scan(
         }
     };
 
-    let requested_base = StdPath::new(&payload.base_path);
+    let base_path = payload
+        .base_path
+        .unwrap_or_else(|| allowed_root.to_string_lossy().to_string());
+
+    if base_path.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<serde_json::Value>::failure(
+                "invalid_request",
+                "base_path must not be empty",
+            )),
+        )
+            .into_response();
+    }
+
+    let requested_base = StdPath::new(&base_path);
     if !is_allowed_base_path(requested_base, allowed_root) {
         return (
             StatusCode::BAD_REQUEST,
@@ -123,7 +127,7 @@ async fn create_scan(
         .scan_service
         .create_scan(NewScanRequest {
             media_type: payload.media_type,
-            base_path: payload.base_path,
+            base_path,
             ttl_minutes: state.config.scan_ttl_minutes,
         })
         .await

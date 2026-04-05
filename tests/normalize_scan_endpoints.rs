@@ -31,10 +31,24 @@ fn test_app_with_service(
     scan_ttl_minutes: u64,
     scan_service: Arc<dyn ScanService>,
 ) -> axum::Router {
+    test_app_with_media_roots(
+        scan_ttl_minutes,
+        scan_service,
+        PathBuf::from("/tmp"),
+        PathBuf::from("/tmp"),
+    )
+}
+
+fn test_app_with_media_roots(
+    scan_ttl_minutes: u64,
+    scan_service: Arc<dyn ScanService>,
+    tv_base_path: PathBuf,
+    movies_base_path: PathBuf,
+) -> axum::Router {
     let config = AppConfig {
         host: "127.0.0.1".to_string(),
-        tv_base_path: PathBuf::from("/tmp"),
-        movies_base_path: PathBuf::from("/tmp"),
+        tv_base_path,
+        movies_base_path,
         database_url: None,
         audit_log_dir: PathBuf::from("/tmp/supafast-jellyfin-tests"),
         port: 3001,
@@ -102,7 +116,7 @@ async fn scan_expires_immediately_when_ttl_is_zero() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"tv","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await
@@ -139,7 +153,7 @@ async fn post_scan_returns_500_when_ttl_overflows() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"tv","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await
@@ -171,7 +185,7 @@ async fn post_scan_returns_201_and_envelope() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"tv","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await
@@ -197,7 +211,7 @@ async fn post_scan_accepts_movie_media_type() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"movie","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"movie"}"#))
                 .expect("request"),
         )
         .await
@@ -248,7 +262,7 @@ async fn create_then_get_then_delete_scan() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"tv","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await
@@ -322,7 +336,7 @@ async fn preserves_correlation_id_header_on_scan_endpoint() {
                 .uri("/api/normalize/scan")
                 .header("x-correlation-id", correlation_id)
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"tv","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await
@@ -348,7 +362,7 @@ async fn rejects_invalid_media_type_with_envelope() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"podcast","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"podcast"}"#))
                 .expect("request"),
         )
         .await
@@ -417,9 +431,14 @@ async fn rejects_base_path_outside_configured_media_root() {
 
 #[tokio::test]
 async fn post_scan_groups_normalized_duplicates_and_reports_merges() {
-    let app = test_app();
     let temp = tempdir().expect("temp dir");
     let base_path = temp.path();
+    let app = test_app_with_media_roots(
+        60,
+        Arc::new(InMemoryScanService::new()) as Arc<dyn ScanService>,
+        base_path.to_path_buf(),
+        base_path.to_path_buf(),
+    );
 
     std::fs::create_dir(base_path.join("Animal Control - 2023 [tvdbid-423022]"))
         .expect("create first duplicate dir");
@@ -428,18 +447,13 @@ async fn post_scan_groups_normalized_duplicates_and_reports_merges() {
     std::fs::create_dir(base_path.join("A Perfect Planet 2021 - [tmdbid-115194]"))
         .expect("create unique dir");
 
-    let request_body = format!(
-        r#"{{"media_type":"tv","base_path":"{}"}}"#,
-        base_path.display()
-    );
-
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(request_body))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await
@@ -490,18 +504,18 @@ async fn post_scan_groups_normalized_duplicates_and_reports_merges() {
 
 #[tokio::test]
 async fn post_scan_reports_zero_merges_when_no_duplicates_exist() {
-    let app = test_app();
     let temp = tempdir().expect("temp dir");
     let base_path = temp.path();
+    let app = test_app_with_media_roots(
+        60,
+        Arc::new(InMemoryScanService::new()) as Arc<dyn ScanService>,
+        base_path.to_path_buf(),
+        base_path.to_path_buf(),
+    );
 
     std::fs::create_dir(base_path.join("Animaniacs 1993 - [tmdbid-82]")).expect("create first dir");
     std::fs::create_dir(base_path.join("Alien - Earth 2025 - [tmdbid-157239]"))
         .expect("create second dir");
-
-    let request_body = format!(
-        r#"{{"media_type":"tv","base_path":"{}"}}"#,
-        base_path.display()
-    );
 
     let response = app
         .oneshot(
@@ -509,7 +523,7 @@ async fn post_scan_reports_zero_merges_when_no_duplicates_exist() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(request_body))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await
@@ -545,7 +559,7 @@ async fn post_scan_returns_500_when_repository_save_fails() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"tv","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await
@@ -662,7 +676,7 @@ async fn post_scan_returns_500_when_repository_prune_fails() {
                 .method("POST")
                 .uri("/api/normalize/scan")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"media_type":"tv","base_path":"/tmp"}"#))
+                .body(Body::from(r#"{"media_type":"tv"}"#))
                 .expect("request"),
         )
         .await

@@ -29,7 +29,8 @@ mkdir -p ./tmp/media/tv ./tmp/media/movies ./tmp/logs
 
 Optional mapping variables:
 
-- `MEDIA_LIBRARY_HOST_ROOT` (default: `./tmp/media`)
+- `TV_LIBRARY_HOST_PATH` (default: `./tmp/media/tv`)
+- `MOVIES_LIBRARY_HOST_PATH` (default: `./tmp/media/movies`)
 - `AUDIT_LOG_HOST_PATH` (default: `./tmp/logs`)
 
 ## 2. Build and run

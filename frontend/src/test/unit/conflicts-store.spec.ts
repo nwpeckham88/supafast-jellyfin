@@ -8,6 +8,7 @@ function sampleScanResult(): ScanResult {
   return {
     scan_id: 'scan-1',
     media_type: 'tv',
+    base_path: '/media/tv',
     summary: {
       total_shows: 2,
       total_episodes: 0,

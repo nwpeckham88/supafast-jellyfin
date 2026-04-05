@@ -15,13 +15,13 @@ export interface ScanGroup {
 export interface ScanResult {
   scan_id: string;
   media_type: MediaType;
+  base_path: string;
   groups: ScanGroup[];
   summary: ScanSummary;
 }
 
 export interface CreateScanPayload {
   media_type: MediaType;
-  base_path: string;
 }
 
 export interface ScanDefaults {

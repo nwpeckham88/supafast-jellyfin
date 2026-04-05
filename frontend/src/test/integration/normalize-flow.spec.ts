@@ -19,6 +19,7 @@ describe('normalize page flow', () => {
           data: {
             scan_id: 'scan-1',
             media_type: 'tv',
+            base_path: '/media/tv',
             groups: [
               {
                 normalized_name: 'Animal Control (2023)',
@@ -40,12 +41,18 @@ describe('normalize page flow', () => {
       })
     );
 
-    scanStore.setBasePath('/tmp');
     await scanStore.startScan();
 
     const state = get(scanStore);
     expect(state?.scanResult).not.toBeNull();
     expect(state?.error).toBeNull();
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/normalize/scan',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ media_type: 'tv' })
+      })
+    );
   });
 
   it('recovers after a failed scan when retried', async () => {
@@ -68,6 +75,7 @@ describe('normalize page flow', () => {
           data: {
             scan_id: 'scan-2',
             media_type: 'tv',
+            base_path: '/media/tv',
             groups: [],
             summary: {
               total_shows: 0,
@@ -82,7 +90,6 @@ describe('normalize page flow', () => {
 
     vi.stubGlobal('fetch', fetchMock);
 
-    scanStore.setBasePath('/tmp');
     await scanStore.startScan();
     expect(get(scanStore)?.error).toBe('temporary failure');
 
@@ -91,5 +98,13 @@ describe('normalize page flow', () => {
     expect(state?.error).toBeNull();
     expect(state?.scanResult?.scan_id).toBe('scan-2');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/normalize/scan',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ media_type: 'tv' })
+      })
+    );
   });
 });

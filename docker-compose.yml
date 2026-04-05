@@ -39,7 +39,8 @@ services:
       - "127.0.0.1:3001:3001"
     volumes:
       - ${AUDIT_LOG_HOST_PATH:-./tmp/logs}:/app/logs
-      - ${MEDIA_LIBRARY_HOST_ROOT:-./tmp/media}:/media
+      - ${TV_LIBRARY_HOST_PATH:-./tmp/media/tv}:${TV_BASE_PATH:-/media/tv}
+      - ${MOVIES_LIBRARY_HOST_PATH:-./tmp/media/movies}:${MOVIES_BASE_PATH:-/media/movies}
 
   frontend:
     build:

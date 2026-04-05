@@ -7,6 +7,7 @@ describe('buildConflictsFromScan', () => {
     const conflicts = buildConflictsFromScan({
       scan_id: 'scan-1',
       media_type: 'tv',
+      base_path: '/media/tv',
       summary: {
         total_shows: 1,
         total_episodes: 0,
