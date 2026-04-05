@@ -17,6 +17,7 @@
   const unresolvedCount = conflictsStore.unresolvedCount;
   let lastSeededResult: ScanResult | null | undefined = undefined;
   let rollbackSessionsLoaded = false;
+  let scanDefaultsLoaded = false;
 
   const hasScan = $derived(Boolean($scanStore.scanResult));
   const hasConflicts = $derived($conflictItems.length > 0);
@@ -63,6 +64,15 @@
     lastSeededResult = result;
     conflictsStore.seedFromScan(result);
     executeStore.syncFromScan(result);
+  });
+
+  $effect(() => {
+    if (scanDefaultsLoaded) {
+      return;
+    }
+
+    scanDefaultsLoaded = true;
+    void scanStore.hydrateDefaults();
   });
 
   $effect(() => {

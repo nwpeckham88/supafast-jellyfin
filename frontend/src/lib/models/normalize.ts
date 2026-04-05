@@ -24,6 +24,11 @@ export interface CreateScanPayload {
   base_path: string;
 }
 
+export interface ScanDefaults {
+  tv_base_path: string;
+  movies_base_path: string;
+}
+
 export interface ExpireScanResult {
   scan_id: string;
   expired: boolean;

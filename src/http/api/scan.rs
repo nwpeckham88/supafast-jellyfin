@@ -15,6 +15,12 @@ use crate::{
     state::AppState,
 };
 
+#[derive(Debug, Serialize)]
+pub struct ScanDefaultsResponse {
+    pub tv_base_path: String,
+    pub movies_base_path: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateScanRequest {
     pub media_type: String,
@@ -29,11 +35,21 @@ pub struct ExpireScanResponse {
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/normalize/config", get(get_scan_defaults))
         .route("/api/normalize/scan", post(create_scan))
         .route(
             "/api/normalize/scan/:scan_id",
             get(get_scan).delete(expire_scan),
         )
+}
+
+async fn get_scan_defaults(State(state): State<AppState>) -> Response {
+    let defaults = ScanDefaultsResponse {
+        tv_base_path: state.config.tv_base_path.to_string_lossy().to_string(),
+        movies_base_path: state.config.movies_base_path.to_string_lossy().to_string(),
+    };
+
+    (StatusCode::OK, Json(ApiResponse::success(defaults))).into_response()
 }
 
 async fn create_scan(

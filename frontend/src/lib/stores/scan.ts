@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store';
 
-import { createScan, expireScan, getScan } from '$lib/api/normalize';
-import type { MediaType, ScanResult } from '$lib/models/normalize';
+import { createScan, expireScan, getScan, getScanDefaults } from '$lib/api/normalize';
+import type { MediaType, ScanDefaults, ScanResult } from '$lib/models/normalize';
 import { notificationsStore } from '$lib/stores/notifications';
 
 export interface ScanStoreState {
@@ -20,13 +20,52 @@ const initialState: ScanStoreState = {
   error: null
 };
 
+const FALLBACK_DEFAULTS: ScanDefaults = {
+  tv_base_path: '/media/tv',
+  movies_base_path: '/media/movies'
+};
+
 function createScanStore() {
   const { subscribe, update, set } = writable<ScanStoreState>(initialState);
+  let defaults: ScanDefaults = FALLBACK_DEFAULTS;
+  let defaultsLoaded = false;
+
+  function defaultBasePathFor(mediaType: MediaType): string {
+    return mediaType === 'tv' ? defaults.tv_base_path : defaults.movies_base_path;
+  }
 
   return {
     subscribe,
+    async hydrateDefaults() {
+      if (defaultsLoaded) {
+        return;
+      }
+
+      try {
+        defaults = await getScanDefaults();
+      } catch {
+        defaults = FALLBACK_DEFAULTS;
+      } finally {
+        defaultsLoaded = true;
+      }
+
+      update((state) => {
+        const nextBasePath = state.basePath.trim().length > 0
+          ? state.basePath
+          : defaultBasePathFor(state.mediaType);
+
+        return {
+          ...state,
+          basePath: nextBasePath
+        };
+      });
+    },
     setMediaType(mediaType: MediaType) {
-      update((state) => ({ ...state, mediaType }));
+      update((state) => ({
+        ...state,
+        mediaType,
+        basePath: defaultBasePathFor(mediaType)
+      }));
     },
     setBasePath(basePath: string) {
       update((state) => ({ ...state, basePath }));
