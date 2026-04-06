@@ -17,6 +17,7 @@
   const unresolvedCount = conflictsStore.unresolvedCount;
   let lastSeededResult: ScanResult | null | undefined = undefined;
   let rollbackSessionsLoaded = false;
+  let scanDefaultsLoaded = false;
 
   const hasScan = $derived(Boolean($scanStore.scanResult));
   const hasConflicts = $derived($conflictItems.length > 0);
@@ -66,6 +67,15 @@
   });
 
   $effect(() => {
+    if (scanDefaultsLoaded) {
+      return;
+    }
+
+    scanDefaultsLoaded = true;
+    void scanStore.hydrateDefaults();
+  });
+
+  $effect(() => {
     if (rollbackSessionsLoaded) {
       return;
     }
@@ -91,6 +101,7 @@
     </div>
     <div class="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-xs text-slate-700">
       <p>Active media type: <span class="font-semibold text-slate-900">{$scanStore.mediaType.toUpperCase()}</span></p>
+      <p class="mt-1">Configured base path: <span class="font-medium text-slate-900">{$scanStore.activeBasePath}</span></p>
     </div>
   </div>
 

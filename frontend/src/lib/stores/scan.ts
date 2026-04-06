@@ -1,11 +1,12 @@
 import { writable } from 'svelte/store';
 
-import { createScan, expireScan, getScan } from '$lib/api/normalize';
-import type { MediaType, ScanResult } from '$lib/models/normalize';
+import { createScan, expireScan, getScan, getScanDefaults } from '$lib/api/normalize';
+import type { MediaType, ScanDefaults, ScanResult } from '$lib/models/normalize';
 import { notificationsStore } from '$lib/stores/notifications';
 
 export interface ScanStoreState {
   mediaType: MediaType;
+  activeBasePath: string;
   scanResult: ScanResult | null;
   loading: boolean;
   error: string | null;
@@ -13,33 +14,67 @@ export interface ScanStoreState {
 
 const initialState: ScanStoreState = {
   mediaType: 'tv',
+  activeBasePath: '/media/tv',
   scanResult: null,
   loading: false,
   error: null
 };
 
+const fallbackDefaults: ScanDefaults = {
+  tv_base_path: '/media/tv',
+  movies_base_path: '/media/movies'
+};
+
 function createScanStore() {
   const { subscribe, update, set } = writable<ScanStoreState>(initialState);
+  let defaultsLoaded = false;
+  let defaults = fallbackDefaults;
+
+  function basePathFor(mediaType: MediaType): string {
+    return mediaType === 'tv' ? defaults.tv_base_path : defaults.movies_base_path;
+  }
 
   return {
     subscribe,
+    async hydrateDefaults() {
+      if (defaultsLoaded) {
+        return;
+      }
+
+      try {
+        defaults = await getScanDefaults();
+      } catch {
+        defaults = fallbackDefaults;
+      } finally {
+        defaultsLoaded = true;
+      }
+
+      update((state) => ({
+        ...state,
+        activeBasePath: basePathFor(state.mediaType)
+      }));
+    },
     setMediaType(mediaType: MediaType) {
       update((state) => ({
         ...state,
-        mediaType
+        mediaType,
+        activeBasePath: basePathFor(mediaType)
       }));
     },
     async startScan() {
       let requestMediaType: MediaType = 'tv';
+      let requestBasePath = '';
 
       update((state) => {
         requestMediaType = state.mediaType;
+        requestBasePath = state.activeBasePath;
         return { ...state, loading: true, error: null };
       });
 
       try {
         const result = await createScan({
-          media_type: requestMediaType
+          media_type: requestMediaType,
+          base_path: requestBasePath
         });
         update((state) => ({ ...state, scanResult: result, loading: false }));
         notificationsStore.success('Scan created successfully.');

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ScanResult } from '$lib/models/normalize';
+  import { prioritizeConflictGroups } from '$lib/stores/conflicts';
 
   interface Props {
     result?: ScanResult | null;
@@ -12,15 +13,7 @@
       return [];
     }
 
-    const conflictGroups = result.groups
-      .filter((group) => group.source_directories.length > 1)
-      .sort((left, right) => left.normalized_name.localeCompare(right.normalized_name));
-
-    const nonConflictGroups = result.groups
-      .filter((group) => group.source_directories.length <= 1)
-      .sort((left, right) => left.normalized_name.localeCompare(right.normalized_name));
-
-    return [...conflictGroups, ...nonConflictGroups];
+    return prioritizeConflictGroups(result.groups);
   });
 </script>
 

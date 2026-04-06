@@ -1,6 +1,6 @@
 import { derived, writable } from 'svelte/store';
 
-import type { ConflictItem, ScanResult } from '$lib/models/normalize';
+import type { ConflictItem, ScanGroup, ScanResult } from '$lib/models/normalize';
 
 type Selections = Record<string, string>;
 
@@ -22,6 +22,18 @@ export function buildConflictsFromScan(scanResult: ScanResult | null): ConflictI
         sourceDirectory
       }))
     }));
+}
+
+export function prioritizeConflictGroups(groups: ScanGroup[]): ScanGroup[] {
+  const conflictGroups = groups
+    .filter((group) => group.source_directories.length > 1)
+    .sort((left, right) => left.normalized_name.localeCompare(right.normalized_name));
+
+  const nonConflictGroups = groups
+    .filter((group) => group.source_directories.length <= 1)
+    .sort((left, right) => left.normalized_name.localeCompare(right.normalized_name));
+
+  return [...conflictGroups, ...nonConflictGroups];
 }
 
 export const conflictsStore = {

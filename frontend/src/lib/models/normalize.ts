@@ -22,6 +22,12 @@ export interface ScanResult {
 
 export interface CreateScanPayload {
   media_type: MediaType;
+  base_path: string;
+}
+
+export interface ScanDefaults {
+  tv_base_path: string;
+  movies_base_path: string;
 }
 
 export interface ExpireScanResult {
