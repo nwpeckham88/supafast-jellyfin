@@ -71,6 +71,7 @@ const initialState: ExecuteStoreState = {
 function createExecuteStore() {
   const { subscribe, update, set } = writable<ExecuteStoreState>(initialState);
   let pollingTimer: ReturnType<typeof setInterval> | null = null;
+  let entriesRefreshInFlight = false;
 
   function stopPolling() {
     if (pollingTimer) {
@@ -83,8 +84,10 @@ function createExecuteStore() {
 
   async function refreshStatusInternal() {
     let jobId = '';
+    let currentEntriesPage = 1;
     update((state) => {
       jobId = state.jobId;
+      currentEntriesPage = state.entriesPage;
       return state;
     });
 
@@ -96,7 +99,26 @@ function createExecuteStore() {
       const status = await getNormalizeJobStatus(jobId);
       applyStatus(status);
 
+      if (status.status === 'pending' || status.status === 'running') {
+        if (!entriesRefreshInFlight) {
+          entriesRefreshInFlight = true;
+          try {
+            await loadEntriesInternal(currentEntriesPage);
+          } finally {
+            entriesRefreshInFlight = false;
+          }
+        }
+      }
+
       if (status.status === 'completed' || status.status === 'failed') {
+        if (!entriesRefreshInFlight) {
+          entriesRefreshInFlight = true;
+          try {
+            await loadEntriesInternal(currentEntriesPage);
+          } finally {
+            entriesRefreshInFlight = false;
+          }
+        }
         stopPolling();
       }
     } catch (error) {

@@ -191,11 +191,11 @@ fn map_execute_error(error: ExecuteServiceError) -> Response {
             )),
         )
             .into_response(),
-        ExecuteServiceError::Preflight => (
+        ExecuteServiceError::Preflight(reason) => (
             StatusCode::CONFLICT,
             Json(ApiResponse::<serde_json::Value>::failure(
                 "preflight_failed",
-                "preflight validation failed",
+                &reason,
             )),
         )
             .into_response(),

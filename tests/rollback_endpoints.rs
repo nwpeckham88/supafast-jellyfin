@@ -384,6 +384,44 @@ async fn rollback_execute_rejects_oversized_idempotency_key() {
 }
 
 #[tokio::test]
+async fn rollback_execute_returns_preflight_reason_when_target_exists() {
+    let app = test_app();
+    let (temp, session_id) = setup_executed_session(&app).await;
+
+    // Recreate one original target path so rollback preview/execute is blocked.
+    std::fs::create_dir(temp.path().join("A Perfect Planet 2021 - [tmdbid-115194]"))
+        .expect("recreate target dir");
+
+    let payload = format!(
+        r#"{{"session_id":"{}","idempotency_key":"preflight-target-exists","dry_run":false}}"#,
+        session_id
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/rollback/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = parse_json(response).await;
+    assert_eq!(
+        body["error"]["code"],
+        Value::String("preflight_failed".to_string())
+    );
+    assert_eq!(
+        body["error"]["message"],
+        Value::String("target path already exists".to_string())
+    );
+}
+
+#[tokio::test]
 async fn rollback_execute_normalizes_whitespace_in_idempotency_key() {
     let app = test_app();
     let (_temp, session_id) = setup_executed_session(&app).await;

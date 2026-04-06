@@ -710,6 +710,47 @@ async fn post_execute_rejects_preflight_collision_with_409() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = parse_json(response).await;
+    assert_eq!(body["error"]["code"], Value::String("preflight_failed".to_string()));
+    assert_eq!(
+        body["error"]["message"],
+        Value::String("multiple operations target the same path".to_string())
+    );
+}
+
+#[tokio::test]
+async fn post_execute_rejects_empty_idempotency_key_with_preflight_reason() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(temp.path().join("Animaniacs 1993 - [tmdbid-82]"))
+        .expect("create source dir");
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":true}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = parse_json(response).await;
+    assert_eq!(body["error"]["code"], Value::String("preflight_failed".to_string()));
+    assert_eq!(
+        body["error"]["message"],
+        Value::String("idempotency_key must not be empty".to_string())
+    );
 }
 
 #[tokio::test]

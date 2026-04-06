@@ -31,8 +31,8 @@ pub enum RollbackServiceError {
     SessionNotRollbackable,
     #[error("idempotency key reused with different payload")]
     IdempotencyConflict,
-    #[error("preflight validation failed")]
-    Preflight,
+    #[error("preflight validation failed: {0}")]
+    Preflight(String),
     #[error("internal rollback service error: {0}")]
     Internal(String),
 }
@@ -206,10 +206,10 @@ impl RollbackService for InMemoryRollbackService {
     ) -> Result<RollbackExecuteResponse, RollbackServiceError> {
         let normalized_key = request.idempotency_key.trim().to_string();
         if normalized_key.is_empty() {
-            return Err(RollbackServiceError::Preflight);
+            return Err(preflight("idempotency_key must not be empty"));
         }
         if normalized_key.len() > 128 {
-            return Err(RollbackServiceError::Preflight);
+            return Err(preflight("idempotency_key must be at most 128 characters"));
         }
         request.idempotency_key = normalized_key;
 
@@ -243,17 +243,23 @@ impl RollbackService for InMemoryRollbackService {
             .iter()
             .any(|operation| operation.blocked_reason.is_some())
         {
-            return Err(RollbackServiceError::Preflight);
+            let reason = operations
+                .iter()
+                .find_map(|operation| operation.blocked_reason.clone())
+                .unwrap_or_else(|| "rollback operation blocked by preflight".to_string());
+            return Err(preflight(reason));
         }
 
         let canonical_base = Path::new(&session.base_path)
             .canonicalize()
-            .map_err(|_| RollbackServiceError::Preflight)?
+            .map_err(|_| preflight("base_path does not exist or is not accessible"))?
             .to_string_lossy()
             .to_string();
 
         if !self.base_path_lock.try_acquire(&canonical_base).await {
-            return Err(RollbackServiceError::Preflight);
+            return Err(preflight(
+                "another rollback or normalize job is already active for this base path",
+            ));
         }
 
         let pending_record = RollbackJobRecord {
@@ -340,7 +346,7 @@ async fn run_rollback_job(
         if classify_blocked_reason(canonical_base, source, target).is_some() {
             job_record.status = RollbackJobStatus::Failed;
             update_rollback_job(&rollback_state, job_record.clone())?;
-            return Err(RollbackServiceError::Preflight);
+            return Err(preflight("rollback operation failed safety revalidation"));
         }
 
         let rename_result = tokio::task::spawn_blocking({
@@ -363,7 +369,7 @@ async fn run_rollback_job(
                 }
                 job_record.status = RollbackJobStatus::Failed;
                 update_rollback_job(&rollback_state, job_record.clone())?;
-                return Err(RollbackServiceError::Preflight);
+                return Err(preflight("rollback filesystem operation failed"));
             }
         }
     }
@@ -385,7 +391,7 @@ fn build_rollback_operations(
 ) -> Result<Vec<RollbackOperationPreview>, RollbackServiceError> {
     let canonical_base = Path::new(&session.base_path)
         .canonicalize()
-        .map_err(|_| RollbackServiceError::Preflight)?;
+        .map_err(|_| preflight("base_path does not exist or is not accessible"))?;
 
     let mut operations = session
         .entries
@@ -449,29 +455,31 @@ fn validate_under_base(
     must_exist: bool,
 ) -> Result<(), RollbackServiceError> {
     if !candidate.is_absolute() {
-        return Err(RollbackServiceError::Preflight);
+        return Err(preflight("operation path is not absolute"));
     }
 
-    let parent = candidate.parent().ok_or(RollbackServiceError::Preflight)?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| preflight("operation path has no parent directory"))?;
     let canonical_parent = parent
         .canonicalize()
-        .map_err(|_| RollbackServiceError::Preflight)?;
+        .map_err(|_| preflight("operation parent path could not be resolved"))?;
 
     if !canonical_parent.starts_with(canonical_base) {
-        return Err(RollbackServiceError::Preflight);
+        return Err(preflight("operation path escapes base path"));
     }
 
     if must_exist && !candidate.exists() {
-        return Err(RollbackServiceError::Preflight);
+        return Err(preflight("required operation source path does not exist"));
     }
 
     if candidate.exists() {
         let canonical_candidate = candidate
             .canonicalize()
-            .map_err(|_| RollbackServiceError::Preflight)?;
+            .map_err(|_| preflight("operation candidate path could not be resolved"))?;
 
         if !canonical_candidate.starts_with(canonical_base) {
-            return Err(RollbackServiceError::Preflight);
+            return Err(preflight("operation candidate escapes base path"));
         }
     }
 
@@ -591,4 +599,8 @@ fn is_terminal_rollback_source(session: &JobRecord) -> bool {
         session.status,
         NormalizeJobStatus::Completed | NormalizeJobStatus::Failed
     )
+}
+
+fn preflight(reason: impl Into<String>) -> RollbackServiceError {
+    RollbackServiceError::Preflight(reason.into())
 }

@@ -21,6 +21,7 @@
 
   const hasScan = $derived(Boolean($scanStore.scanResult));
   const hasConflicts = $derived($conflictItems.length > 0);
+  const hasPreview = $derived(hasScan);
   const hasExecution = $derived(Boolean($executeStore.jobId));
   const hasRollbackPreview = $derived(Boolean($rollbackStore.preview));
 
@@ -42,14 +43,19 @@
             : 'done'
     },
     {
-      title: '3. Execute',
+      title: '3. Preview',
+      detail: hasPreview ? 'Review grouped changes before execute' : 'Scan first to build preview',
+      state: hasPreview ? 'active' : 'idle'
+    },
+    {
+      title: '4. Execute',
       detail: hasExecution
         ? `${$executeStore.status ?? 'pending'} (${ $executeStore.completedOps }/${ $executeStore.totalOps })`
         : 'Run dry-run or execute',
       state: hasExecution ? 'active' : 'idle'
     },
     {
-      title: '4. Rollback',
+      title: '5. Rollback',
       detail: hasRollbackPreview ? 'Preview ready' : 'Load a rollback session preview',
       state: hasRollbackPreview ? 'active' : 'idle'
     }
@@ -93,7 +99,7 @@
   <div class="flex flex-wrap items-start justify-between gap-4">
     <div>
       <p class="text-xs font-semibold uppercase tracking-[0.16em] text-teal-700">Normalization Console</p>
-      <h1 class="mt-2 text-3xl font-bold tracking-tight">Scan, Resolve, Execute, Recover</h1>
+      <h1 class="mt-2 text-3xl font-bold tracking-tight">Scan, Resolve, Preview, Execute, Recover</h1>
       <p class="mt-3 max-w-3xl text-sm text-slate-700">
         End-to-end workflow for safe media normalization. Every operation is previewed first,
         tracked with idempotency, and can be rolled back from recorded sessions.
@@ -105,7 +111,7 @@
     </div>
   </div>
 
-  <div class="mt-5 grid gap-3 md:grid-cols-4">
+  <div class="mt-5 grid gap-3 md:grid-cols-5">
     {#each workflowSteps as step}
       <article
         class="rounded-xl border bg-white/85 p-3"

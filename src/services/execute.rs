@@ -40,8 +40,8 @@ pub enum ExecuteServiceError {
     ScanMismatch,
     #[error("idempotency key reused with different payload")]
     IdempotencyConflict,
-    #[error("preflight validation failed")]
-    Preflight,
+    #[error("preflight validation failed: {0}")]
+    Preflight(String),
     #[error("internal execute service error: {0}")]
     Internal(String),
 }
@@ -78,6 +78,8 @@ pub struct InMemoryExecuteService {
     base_path_lock: Arc<BasePathLockManager>,
 }
 
+const DRY_RUN_PROGRESS_BATCH_SIZE: usize = 100;
+
 impl InMemoryExecuteService {
     pub fn new(
         scan_service: Arc<dyn ScanService>,
@@ -101,7 +103,7 @@ impl ExecuteService for InMemoryExecuteService {
         let request_fingerprint = compute_request_fingerprint(&request)?;
 
         if request.idempotency_key.trim().is_empty() {
-            return Err(ExecuteServiceError::Preflight);
+            return Err(preflight("idempotency_key must not be empty"));
         }
 
         let scan = self
@@ -145,7 +147,9 @@ impl ExecuteService for InMemoryExecuteService {
             .try_acquire(&canonical_request_base)
             .await
         {
-            return Err(ExecuteServiceError::Preflight);
+            return Err(preflight(
+                "another normalize job is already active for this base path",
+            ));
         }
 
         let job_id = Uuid::new_v4();
@@ -335,9 +339,17 @@ async fn run_job(
     };
 
     if dry_run {
-        for entry in &mut job.entries {
-            entry.status = AuditOpStatus::Succeeded;
-            entry.error_message = None;
+        let total_entries = job.entries.len();
+        for index in 0..total_entries {
+            job.entries[index].status = AuditOpStatus::Succeeded;
+            job.entries[index].error_message = None;
+
+            let processed = index + 1;
+            let should_publish = processed % DRY_RUN_PROGRESS_BATCH_SIZE == 0 || processed == total_entries;
+            if should_publish {
+                let _ = repository.update_job(job.clone()).await;
+                tokio::task::yield_now().await;
+            }
         }
 
         job.status = NormalizeJobStatus::Completed;
@@ -405,11 +417,11 @@ fn build_plan(
 ) -> Result<NormalizePlan, ExecuteServiceError> {
     let base_path = Path::new(&request.base_path);
     if !base_path.is_absolute() {
-        return Err(ExecuteServiceError::Preflight);
+        return Err(preflight("base_path must be absolute"));
     }
     let canonical_base = base_path
         .canonicalize()
-        .map_err(|_| ExecuteServiceError::Preflight)?;
+        .map_err(|_| preflight("base_path does not exist or is not accessible"))?;
 
     let overrides: HashMap<&str, &str> = request
         .name_overrides
@@ -443,7 +455,9 @@ fn build_plan(
                 .iter()
                 .any(|source| source == selected)
             {
-                return Err(ExecuteServiceError::Preflight);
+                return Err(preflight(
+                    "conflict resolution selected_source_directory is not in scan group",
+                ));
             }
         }
 
@@ -453,14 +467,14 @@ fn build_plan(
                     let source_relative = parse_relative_component(source_directory)?;
                     let source_path =
                         path_guard::resolve_under_base(&canonical_base, &source_relative)
-                            .map_err(|_| ExecuteServiceError::Preflight)?;
+                            .map_err(|_| preflight("merge source resolved outside base path"))?;
 
                     let merge_target_relative = parse_relative_component(selected)?;
                     let merge_target_path = path_guard::resolve_under_base(
                         &canonical_base,
                         &merge_target_relative,
                     )
-                    .map_err(|_| ExecuteServiceError::Preflight)?;
+                    .map_err(|_| preflight("merge target resolved outside base path"))?;
 
                     operation_candidates.extend(
                         build_group_merge_operations(
@@ -468,7 +482,7 @@ fn build_plan(
                             &merge_target_path,
                             &request.media_type,
                         )
-                        .map_err(|_| ExecuteServiceError::Preflight)?,
+                        .map_err(|_| preflight("failed to build merge operations from filesystem"))?,
                     );
                     continue;
                 }
@@ -486,14 +500,14 @@ fn build_plan(
             let source_relative = parse_relative_component(source_directory)?;
             let target_relative = parse_relative_component(target_directory)?;
             let source_path = path_guard::resolve_under_base(&canonical_base, &source_relative)
-                .map_err(|_| ExecuteServiceError::Preflight)?;
+                .map_err(|_| preflight("source path resolved outside base path"))?;
             let target_path = path_guard::resolve_under_base(&canonical_base, &target_relative)
-                .map_err(|_| ExecuteServiceError::Preflight)?;
+                .map_err(|_| preflight("target path resolved outside base path"))?;
 
             if request.media_type == "tv" {
                 operation_candidates.extend(
                     build_tv_nested_operations(&source_path)
-                        .map_err(|_| ExecuteServiceError::Preflight)?,
+                        .map_err(|_| preflight("failed to inspect nested TV paths"))?,
                 );
             }
 
@@ -713,17 +727,17 @@ fn is_ignored_nested_directory(name: &str) -> bool {
 fn parse_relative_component(value: &str) -> Result<PathBuf, ExecuteServiceError> {
     let path = Path::new(value);
     if path.is_absolute() {
-        return Err(ExecuteServiceError::Preflight);
+        return Err(preflight("path component must be relative"));
     }
 
     let mut components = path.components();
     let only_component = components.next();
     if components.next().is_some() {
-        return Err(ExecuteServiceError::Preflight);
+        return Err(preflight("path component must be a single directory segment"));
     }
 
     if !matches!(only_component, Some(Component::Normal(_))) {
-        return Err(ExecuteServiceError::Preflight);
+        return Err(preflight("path component contains invalid traversal or special segments"));
     }
 
     Ok(PathBuf::from(value))
@@ -732,7 +746,7 @@ fn parse_relative_component(value: &str) -> Result<PathBuf, ExecuteServiceError>
 fn preflight_validate(plan: &NormalizePlan, dry_run: bool) -> Result<(), ExecuteServiceError> {
     let canonical_base = Path::new(&plan.base_path)
         .canonicalize()
-        .map_err(|_| ExecuteServiceError::Preflight)?;
+        .map_err(|_| preflight("base_path could not be resolved during preflight"))?;
 
     let mut targets = HashSet::new();
 
@@ -743,11 +757,11 @@ fn preflight_validate(plan: &NormalizePlan, dry_run: bool) -> Result<(), Execute
         revalidate_operation_paths(&canonical_base, source, target)?;
 
         if !targets.insert(target.to_path_buf()) {
-            return Err(ExecuteServiceError::Preflight);
+            return Err(preflight("multiple operations target the same path"));
         }
 
         if !source.exists() {
-            return Err(ExecuteServiceError::Preflight);
+            return Err(preflight("source path does not exist"));
         }
 
         if !dry_run && target.exists() {
@@ -757,7 +771,7 @@ fn preflight_validate(plan: &NormalizePlan, dry_run: bool) -> Result<(), Execute
             };
 
             if !same_path {
-                return Err(ExecuteServiceError::Preflight);
+                return Err(preflight("target path already exists"));
             }
         }
     }
@@ -781,28 +795,30 @@ fn ensure_absolute_under_base(
     must_exist: bool,
 ) -> Result<(), ExecuteServiceError> {
     if !candidate.is_absolute() {
-        return Err(ExecuteServiceError::Preflight);
+        return Err(preflight("operation path is not absolute"));
     }
 
-    let parent = candidate.parent().ok_or(ExecuteServiceError::Preflight)?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| preflight("operation path has no parent directory"))?;
     let canonical_parent = parent
         .canonicalize()
-        .map_err(|_| ExecuteServiceError::Preflight)?;
+        .map_err(|_| preflight("operation parent path could not be resolved"))?;
 
     if !canonical_parent.starts_with(canonical_base) {
-        return Err(ExecuteServiceError::Preflight);
+        return Err(preflight("operation path escapes base path"));
     }
 
     if must_exist && !candidate.exists() {
-        return Err(ExecuteServiceError::Preflight);
+        return Err(preflight("required operation source path does not exist"));
     }
 
     if candidate.exists() {
         let canonical_candidate = candidate
             .canonicalize()
-            .map_err(|_| ExecuteServiceError::Preflight)?;
+            .map_err(|_| preflight("operation candidate path could not be resolved"))?;
         if !canonical_candidate.starts_with(canonical_base) {
-            return Err(ExecuteServiceError::Preflight);
+            return Err(preflight("operation candidate escapes base path"));
         }
     }
 
@@ -874,8 +890,12 @@ fn map_repo_error(error: ExecuteRepositoryError) -> ExecuteServiceError {
 fn canonicalize_base_path(path: &str) -> Result<String, ExecuteServiceError> {
     let canonical = Path::new(path)
         .canonicalize()
-        .map_err(|_| ExecuteServiceError::Preflight)?;
+        .map_err(|_| preflight("base_path does not exist or is not accessible"))?;
     Ok(canonical.to_string_lossy().to_string())
+}
+
+fn preflight(reason: impl Into<String>) -> ExecuteServiceError {
+    ExecuteServiceError::Preflight(reason.into())
 }
 
 fn map_plan_op_type(op_type: PlanOpType) -> &'static str {

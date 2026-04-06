@@ -150,11 +150,11 @@ fn map_rollback_error(error: RollbackServiceError) -> Response {
             )),
         )
             .into_response(),
-        RollbackServiceError::Preflight => (
+        RollbackServiceError::Preflight(reason) => (
             StatusCode::CONFLICT,
             Json(ApiResponse::<serde_json::Value>::failure(
                 "preflight_failed",
-                "rollback preflight validation failed",
+                &reason,
             )),
         )
             .into_response(),
