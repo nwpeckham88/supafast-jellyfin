@@ -334,15 +334,21 @@ async fn run_job(
         }
     };
 
+    if dry_run {
+        for entry in &mut job.entries {
+            entry.status = AuditOpStatus::Succeeded;
+            entry.error_message = None;
+        }
+
+        job.status = NormalizeJobStatus::Completed;
+        let _ = repository.update_job(job).await;
+        base_path_lock.release(&base_key).await;
+        return;
+    }
+
     for index in 0..job.entries.len() {
         job.entries[index].status = AuditOpStatus::Running;
         let _ = repository.update_job(job.clone()).await;
-
-        if dry_run {
-            job.entries[index].status = AuditOpStatus::Succeeded;
-            let _ = repository.update_job(job.clone()).await;
-            continue;
-        }
 
         let source_path = job.entries[index].source_path.clone();
         let target_path = job.entries[index].target_path.clone();
