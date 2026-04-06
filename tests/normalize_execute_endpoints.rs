@@ -809,6 +809,7 @@ async fn post_execute_allows_manual_conflict_resolution_for_real_world_movie_mer
     let execute_body = parse_json(execute_response).await;
     let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
 
+    let mut completed = false;
     for _ in 0..250 {
         let status_response = app
             .clone()
@@ -824,6 +825,7 @@ async fn post_execute_allows_manual_conflict_resolution_for_real_world_movie_mer
         let status_body = parse_json(status_response).await;
         let status = status_body["data"]["status"].as_str().unwrap_or_default();
         if status == "completed" {
+            completed = true;
             break;
         }
         if status == "failed" {
@@ -831,6 +833,7 @@ async fn post_execute_allows_manual_conflict_resolution_for_real_world_movie_mer
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
+    assert!(completed, "normalize job did not complete in expected time window");
 
     let resolved_root = temp.path().join(source_b);
     assert!(
