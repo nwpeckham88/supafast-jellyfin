@@ -178,7 +178,6 @@
   <div class="grid gap-5 xl:grid-cols-[1.4fr_1fr]">
     <div class="space-y-5">
       <ScanSummaryCard result={$scanStore.scanResult} loading={$scanStore.loading} />
-      <PreviewTree result={$scanStore.scanResult} />
       <ConflictPanel
         conflicts={$conflictItems}
         selections={$conflictSelections}
@@ -187,6 +186,7 @@
         onAutoSelectLikelyBest={() => conflictsStore.autoSelectLikelyBest()}
         onReset={() => conflictsStore.reset()}
       />
+      <PreviewTree result={$scanStore.scanResult} />
     </div>
 
     <div class="space-y-5">
