@@ -15,7 +15,7 @@ use crate::{
     models::{
         audit::{AuditEntry, AuditOpStatus},
         execute::{
-            ExecuteNormalizeRequest, ExecuteNormalizeResponse, MovieRenameMode,
+            ExecuteNormalizeRequest, ExecuteNormalizeResponse, ExtraFileType, MovieRenameMode,
             NormalizeJobEntriesResponse, NormalizeJobListResponse, NormalizeJobResponse,
             NormalizeJobStatus, NormalizeJobSummary, PaginationMeta,
         },
@@ -79,6 +79,7 @@ pub struct InMemoryExecuteService {
     repository: Arc<dyn ExecuteRepository>,
     base_path_lock: Arc<BasePathLockManager>,
     default_movie_rename_mode: MovieRenameMode,
+    default_remove_extra_file_types: Vec<ExtraFileType>,
 }
 
 const DRY_RUN_PROGRESS_BATCH_SIZE: usize = 100;
@@ -89,12 +90,14 @@ impl InMemoryExecuteService {
         repository: Arc<dyn ExecuteRepository>,
         base_path_lock: Arc<BasePathLockManager>,
         default_movie_rename_mode: MovieRenameMode,
+        default_remove_extra_file_types: Vec<ExtraFileType>,
     ) -> Self {
         Self {
             scan_service,
             repository,
             base_path_lock,
             default_movie_rename_mode,
+            default_remove_extra_file_types,
         }
     }
 }
@@ -107,6 +110,9 @@ impl ExecuteService for InMemoryExecuteService {
     ) -> Result<ExecuteNormalizeResponse, ExecuteServiceError> {
         if request.movie_rename_mode.is_none() {
             request.movie_rename_mode = Some(self.default_movie_rename_mode);
+        }
+        if request.remove_extra_file_types.is_none() {
+            request.remove_extra_file_types = Some(self.default_remove_extra_file_types.clone());
         }
 
         let request_fingerprint = compute_request_fingerprint(&request)?;
@@ -373,13 +379,18 @@ async fn run_job(
 
         let source_path = job.entries[index].source_path.clone();
         let target_path = job.entries[index].target_path.clone();
-        if revalidate_operation_paths(
-            &canonical_base,
-            Path::new(&source_path),
-            Path::new(&target_path),
-        )
-        .is_err()
-        {
+        let op_type = job.entries[index].op_type.clone();
+        let revalidation_failed = if op_type == "delete_dir" || op_type == "delete_file" {
+            ensure_absolute_under_base(&canonical_base, Path::new(&source_path), true).is_err()
+        } else {
+            revalidate_operation_paths(
+                &canonical_base,
+                Path::new(&source_path),
+                Path::new(&target_path),
+            )
+            .is_err()
+        };
+        if revalidation_failed {
             tracing::warn!("execute preflight revalidation failed");
             job.entries[index].status = AuditOpStatus::Failed;
             job.entries[index].error_message =
@@ -391,12 +402,13 @@ async fn run_job(
             return;
         }
 
-        let op_type = job.entries[index].op_type.clone();
         let source_for_op = source_path.clone();
         let target_for_op = target_path.clone();
         let fs_outcome = tokio::task::spawn_blocking(move || {
             if op_type == "delete_dir" {
                 std::fs::remove_dir(Path::new(&source_for_op))
+            } else if op_type == "delete_file" {
+                std::fs::remove_file(Path::new(&source_for_op))
             } else {
                 fs_ops::rename_with_exdev_fallback(
                     Path::new(&source_for_op),
@@ -463,6 +475,12 @@ fn build_plan(
         .collect();
 
     let movie_rename_mode = request.movie_rename_mode.unwrap_or(MovieRenameMode::Clean);
+    let remove_extra_file_types = request
+        .remove_extra_file_types
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
     let mut operation_candidates = Vec::new();
 
     for group in &scan.groups {
@@ -513,6 +531,7 @@ fn build_plan(
                             &merge_target_path,
                             &request.media_type,
                             selected_target_directory.as_deref(),
+                            &remove_extra_file_types,
                         )
                         .map_err(|_| preflight("failed to build merge operations from filesystem"))?,
                     );
@@ -619,6 +638,7 @@ fn build_group_merge_operations(
     target_group_path: &Path,
     media_type: &str,
     movie_target_directory_name: Option<&str>,
+    remove_extra_file_types: &HashSet<ExtraFileType>,
 ) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
     let mut operations = Vec::new();
 
@@ -652,6 +672,13 @@ fn build_group_merge_operations(
         }
 
         if source_path.is_dir() {
+            if media_type == "movie"
+                && should_remove_extra_movie_directory(&source_path, remove_extra_file_types)
+            {
+                operations.extend(build_delete_tree_operations(&source_path)?);
+                continue;
+            }
+
             if target_path.exists() {
                 // Both source and target dirs exist — recurse to merge contents
                 operations.extend(build_group_merge_operations(
@@ -659,6 +686,7 @@ fn build_group_merge_operations(
                     &target_path,
                     media_type,
                     movie_target_directory_name,
+                    remove_extra_file_types,
                 )?);
             } else {
                 // Move entire directory to target (it's a merge move, not a simple rename)
@@ -670,17 +698,30 @@ fn build_group_merge_operations(
                     target_name,
                     PlanOpType::RenameDir,
                     source_path,
-                    target_path,
+                    target_path.to_path_buf(),
                 ));
             }
         } else {
+            if media_type == "movie"
+                && should_remove_extra_movie_file(&source_path, &source_name, remove_extra_file_types)
+            {
+                operations.push((
+                    source_name.clone(),
+                    source_name.clone(),
+                    PlanOpType::DeleteFile,
+                    source_path,
+                    target_group_path.join(source_name),
+                ));
+                continue;
+            }
+
             // File move during merge uses MoveFile op type
             operations.push((
                 source_name,
                 target_name,
                 PlanOpType::MoveFile,
                 source_path,
-                target_path,
+                target_path.to_path_buf(),
             ));
         }
     }
@@ -783,7 +824,8 @@ fn op_type_rank(op_type: PlanOpType) -> u8 {
     match op_type {
         PlanOpType::RenameFile | PlanOpType::MoveFile => 0,
         PlanOpType::RenameDir => 1,
-        PlanOpType::DeleteDir => 2,
+        PlanOpType::DeleteFile => 2,
+        PlanOpType::DeleteDir => 3,
     }
 }
 
@@ -821,9 +863,9 @@ fn preflight_validate(plan: &NormalizePlan, dry_run: bool) -> Result<(), Execute
         let source = Path::new(&operation.source_path);
         let target = Path::new(&operation.target_path);
 
-        // DeleteDir only needs source validation — target is same as source
-        if operation.op_type == PlanOpType::DeleteDir {
-            ensure_absolute_under_base(&canonical_base, source, false)?;
+        // Delete ops only need source validation.
+        if matches!(operation.op_type, PlanOpType::DeleteDir | PlanOpType::DeleteFile) {
+            ensure_absolute_under_base(&canonical_base, source, true)?;
             continue;
         }
 
@@ -929,6 +971,13 @@ fn compute_request_fingerprint(
     overrides.sort();
 
     let movie_rename_mode = request.movie_rename_mode.unwrap_or(MovieRenameMode::Clean);
+    let mut remove_extra_file_types = request.remove_extra_file_types.clone().unwrap_or_default();
+    remove_extra_file_types.sort_by_key(|value| match value {
+        ExtraFileType::Media => 0,
+        ExtraFileType::Nfo => 1,
+        ExtraFileType::Srt => 2,
+        ExtraFileType::Trickplay => 3,
+    });
     let mut resolutions = request
         .conflict_resolutions
         .iter()
@@ -946,6 +995,7 @@ fn compute_request_fingerprint(
         request.media_type.as_str(),
         canonical_base_path,
         movie_rename_mode,
+        remove_extra_file_types,
         request.dry_run,
         overrides,
         resolutions,
@@ -976,6 +1026,7 @@ fn map_plan_op_type(op_type: PlanOpType) -> &'static str {
         PlanOpType::RenameDir => "rename_dir",
         PlanOpType::RenameFile => "rename_file",
         PlanOpType::MoveFile => "move_file",
+        PlanOpType::DeleteFile => "delete_file",
         PlanOpType::DeleteDir => "delete_dir",
     }
 }
@@ -1336,6 +1387,40 @@ fn build_movie_file_rename_operations(
     Ok(operations)
 }
 
+fn should_remove_extra_movie_directory(
+    source_path: &Path,
+    remove_extra_file_types: &HashSet<ExtraFileType>,
+) -> bool {
+    remove_extra_file_types.contains(&ExtraFileType::Trickplay) && is_trickplay_directory(source_path)
+}
+
+fn should_remove_extra_movie_file(
+    source_path: &Path,
+    source_name: &str,
+    remove_extra_file_types: &HashSet<ExtraFileType>,
+) -> bool {
+    if remove_extra_file_types.contains(&ExtraFileType::Trickplay)
+        && source_path
+            .ancestors()
+            .skip(1)
+            .any(is_trickplay_directory)
+    {
+        return true;
+    }
+
+    if remove_extra_file_types.contains(&ExtraFileType::Nfo)
+        && source_name.to_ascii_lowercase().ends_with(".nfo")
+    {
+        return true;
+    }
+
+    if remove_extra_file_types.contains(&ExtraFileType::Srt) && is_subtitle_file(source_name) {
+        return true;
+    }
+
+    remove_extra_file_types.contains(&ExtraFileType::Media) && is_movie_media_file(source_name)
+}
+
 fn normalize_movie_related_filename(filename: &str, target_movie_name: &str) -> String {
     if filename.eq_ignore_ascii_case("movie.nfo") {
         return "movie.nfo".to_string();
@@ -1424,6 +1509,69 @@ fn split_movie_stem_and_suffix(input: &str) -> (&str, &str) {
     }
 
     (input, "")
+}
+
+fn is_movie_media_file(name: &str) -> bool {
+    let Some(extension) = Path::new(name).extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "mkv" | "mp4" | "avi" | "m4v" | "mov" | "wmv" | "ts"
+    )
+}
+
+fn is_subtitle_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".srt", ".ass", ".ssa", ".sub", ".vtt", ".sup"]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
+}
+
+fn is_trickplay_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name.ends_with(".trickplay"))
+        .unwrap_or(false)
+}
+
+fn build_delete_tree_operations(
+    path: &Path,
+) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
+    let mut operations = Vec::new();
+
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let child_path = entry.path();
+        if child_path.is_dir() {
+            operations.extend(build_delete_tree_operations(&child_path)?);
+        } else {
+            let name = entry.file_name().to_string_lossy().to_string();
+            operations.push((
+                name.clone(),
+                name,
+                PlanOpType::DeleteFile,
+                child_path.clone(),
+                child_path,
+            ));
+        }
+    }
+
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_string();
+    operations.push((
+        name.clone(),
+        name,
+        PlanOpType::DeleteDir,
+        path.to_path_buf(),
+        path.to_path_buf(),
+    ));
+
+    Ok(operations)
 }
 
 fn summarize_job(job: &JobRecord) -> NormalizeJobSummary {

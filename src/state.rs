@@ -40,6 +40,7 @@ impl AppState {
             execute_repository.clone(),
             base_path_lock.clone(),
             config.movie_rename_mode,
+            config.remove_extra_file_types.clone(),
         ));
 
         let rollback_service: Arc<dyn RollbackService> = Arc::new(InMemoryRollbackService::new(

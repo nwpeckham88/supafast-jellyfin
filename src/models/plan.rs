@@ -7,6 +7,7 @@ pub enum PlanOpType {
     RenameDir,
     RenameFile,
     MoveFile,
+    DeleteFile,
     DeleteDir,
 }
 

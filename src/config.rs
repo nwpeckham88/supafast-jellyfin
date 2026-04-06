@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::error::AppError;
-use crate::models::execute::MovieRenameMode;
+use crate::models::execute::{ExtraFileType, MovieRenameMode};
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub scan_ttl_minutes: u64,
     pub follow_symlinks: bool,
     pub movie_rename_mode: MovieRenameMode,
+    pub remove_extra_file_types: Vec<ExtraFileType>,
 }
 
 impl AppConfig {
@@ -42,6 +43,7 @@ impl AppConfig {
             scan_ttl_minutes: parse_u64("SCAN_TTL_MINUTES", 60)?,
             follow_symlinks: parse_bool("FOLLOW_SYMLINKS", false)?,
             movie_rename_mode: parse_movie_rename_mode("MOVIE_RENAME_MODE", MovieRenameMode::Clean)?,
+            remove_extra_file_types: parse_extra_file_types("REMOVE_EXTRA_FILE_TYPES")?,
         })
     }
 
@@ -52,6 +54,7 @@ impl AppConfig {
             scan_ttl_minutes = self.scan_ttl_minutes,
             follow_symlinks = self.follow_symlinks,
             movie_rename_mode = ?self.movie_rename_mode,
+            remove_extra_file_types = ?self.remove_extra_file_types,
             tv_base_path = %self.tv_base_path.display(),
             movies_base_path = %self.movies_base_path.display(),
             audit_log_dir = %self.audit_log_dir.display(),
@@ -211,12 +214,46 @@ fn parse_movie_rename_mode(
     }
 }
 
+fn parse_extra_file_types(key: &'static str) -> Result<Vec<ExtraFileType>, AppError> {
+    let Some(raw) = env::var_os(key) else {
+        return Ok(Vec::new());
+    };
+
+    let raw = raw.to_string_lossy().to_string();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut values = Vec::new();
+    for part in trimmed.split(',') {
+        let item = match part.trim().to_ascii_lowercase().as_str() {
+            "media" => ExtraFileType::Media,
+            "nfo" => ExtraFileType::Nfo,
+            "trickplay" => ExtraFileType::Trickplay,
+            "srt" | "subtitle" | "subtitles" => ExtraFileType::Srt,
+            _ => {
+                return Err(AppError::InvalidConfigValue {
+                    key,
+                    value: raw,
+                });
+            }
+        };
+
+        if !values.contains(&item) {
+            values.push(item);
+        }
+    }
+
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::AppConfig;
-    use crate::models::execute::MovieRenameMode;
+    use crate::models::execute::{ExtraFileType, MovieRenameMode};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -257,6 +294,7 @@ mod tests {
                 ("SCAN_TTL_MINUTES", None),
                 ("FOLLOW_SYMLINKS", None),
                 ("MOVIE_RENAME_MODE", None),
+                ("REMOVE_EXTRA_FILE_TYPES", None),
             ],
             || {
                 let config = AppConfig::from_env().expect("config from env");
@@ -266,6 +304,7 @@ mod tests {
                 assert_eq!(config.scan_ttl_minutes, 60);
                 assert!(!config.follow_symlinks);
                 assert_eq!(config.movie_rename_mode, MovieRenameMode::Clean);
+                assert!(config.remove_extra_file_types.is_empty());
             },
         );
     }
@@ -291,6 +330,22 @@ mod tests {
         with_env_overrides(&[("MOVIE_RENAME_MODE", Some("surprise"))], || {
             let result = AppConfig::from_env();
             assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn parses_remove_extra_file_types() {
+        with_env_overrides(&[("REMOVE_EXTRA_FILE_TYPES", Some("media,nfo,srt,trickplay"))], || {
+            let config = AppConfig::from_env().expect("config from env");
+            assert_eq!(
+                config.remove_extra_file_types,
+                vec![
+                    ExtraFileType::Media,
+                    ExtraFileType::Nfo,
+                    ExtraFileType::Srt,
+                    ExtraFileType::Trickplay,
+                ]
+            );
         });
     }
 

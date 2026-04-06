@@ -402,6 +402,17 @@ fn build_rollback_operations(
         .iter()
         .filter(|entry| entry.status == AuditOpStatus::Succeeded)
         .map(|entry| {
+            if entry.op_type == "delete_file" {
+                return RollbackOperationPreview {
+                    op_id: entry.op_id,
+                    op_index: entry.op_index,
+                    op_type: entry.op_type.clone(),
+                    source_path: entry.source_path.clone(),
+                    target_path: entry.source_path.clone(),
+                    blocked_reason: Some("delete_file operations are irreversible".to_string()),
+                };
+            }
+
             let source_path = entry.target_path.clone();
             let target_path = entry.source_path.clone();
 

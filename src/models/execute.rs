@@ -21,6 +21,8 @@ pub struct ExecuteNormalizeRequest {
     pub conflict_resolutions: Vec<ConflictResolution>,
     #[serde(default)]
     pub movie_rename_mode: Option<MovieRenameMode>,
+    #[serde(default)]
+    pub remove_extra_file_types: Option<Vec<ExtraFileType>>,
     pub dry_run: bool,
 }
 
@@ -29,6 +31,15 @@ pub struct ExecuteNormalizeRequest {
 pub enum MovieRenameMode {
     Clean,
     ProviderIds,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtraFileType {
+    Media,
+    Nfo,
+    Trickplay,
+    Srt,
 }
 
 #[derive(Debug, Clone, Deserialize)]

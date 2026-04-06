@@ -56,6 +56,7 @@ fn test_app_with_media_roots(
         scan_ttl_minutes,
         follow_symlinks: false,
         movie_rename_mode: MovieRenameMode::Clean,
+        remove_extra_file_types: Vec::new(),
     };
     let state = AppState::new(config, scan_service, None);
     build_app(state)

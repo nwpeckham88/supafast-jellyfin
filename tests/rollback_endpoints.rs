@@ -21,6 +21,7 @@ fn test_app() -> axum::Router {
         scan_ttl_minutes: 60,
         follow_symlinks: false,
         movie_rename_mode: MovieRenameMode::Clean,
+        remove_extra_file_types: Vec::new(),
     };
     build_app(AppState::new_for_tests(config))
 }
