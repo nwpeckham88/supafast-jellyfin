@@ -719,6 +719,135 @@ async fn post_execute_rejects_preflight_collision_with_409() {
 }
 
 #[tokio::test]
+async fn post_execute_rejects_real_world_duplicate_movie_dirs_without_resolution() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "28 Years Later∶ The Bone Temple (2026) - [imdb-tt32141377]";
+    let source_b = "28 Years Later - The Bone Temple (2026) - [imdb-tt32141377]";
+
+    std::fs::create_dir_all(temp.path().join(source_a)).expect("create source a");
+    std::fs::create_dir_all(temp.path().join(source_b)).expect("create source b");
+
+    let scan_id =
+        create_scan_with_media_type(&app, &temp.path().display().to_string(), "movie").await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"real-world-dup-no-resolution","media_type":"movie","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = parse_json(response).await;
+    assert_eq!(body["error"]["code"], Value::String("preflight_failed".to_string()));
+    assert_eq!(
+        body["error"]["message"],
+        Value::String("multiple operations target the same path".to_string())
+    );
+}
+
+#[tokio::test]
+async fn post_execute_allows_manual_conflict_resolution_for_real_world_movie_merge() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "28 Years Later∶ The Bone Temple (2026) - [imdb-tt32141377]";
+    let source_b = "28 Years Later - The Bone Temple (2026) - [imdb-tt32141377]";
+    let trickplay_relative =
+        "28 Years Later - The Bone Temple (2026) - [tmdbid-1272837].trickplay/320 - 10x10";
+
+    std::fs::create_dir_all(temp.path().join(source_a).join(trickplay_relative))
+        .expect("create source a trickplay tree");
+    std::fs::create_dir_all(temp.path().join(source_b).join(trickplay_relative))
+        .expect("create source b trickplay tree");
+    std::fs::write(
+        temp.path().join(source_a).join(trickplay_relative).join("3.jpg"),
+        "a",
+    )
+    .expect("create source a trickplay file");
+    std::fs::write(
+        temp.path().join(source_b).join(trickplay_relative).join("4.jpg"),
+        "b",
+    )
+    .expect("create source b trickplay file");
+
+    let scan_id =
+        create_scan_with_media_type(&app, &temp.path().display().to_string(), "movie").await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"real-world-dup-manual-resolution","media_type":"movie","base_path":"{}","name_overrides":[{{"source_directory":"{}","normalized_name":"{}"}}],"conflict_resolutions":[{{"normalized_name":"28 Years Later - The Bone Temple (2026)","selected_source_directory":"{}"}}],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b,
+        source_b,
+        source_b
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..250 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let resolved_root = temp.path().join(source_b);
+    assert!(
+        resolved_root.join(trickplay_relative).join("3.jpg").is_file(),
+        "expected merged trickplay file to be present under selected source"
+    );
+    assert!(
+        resolved_root.join(trickplay_relative).join("4.jpg").is_file(),
+        "expected pre-existing trickplay file in selected source to remain"
+    );
+    assert!(
+        !temp.path().join(source_a).join(trickplay_relative).join("3.jpg").exists(),
+        "expected source file to be moved out of non-selected folder"
+    );
+}
+
+#[tokio::test]
 async fn post_execute_rejects_empty_idempotency_key_with_preflight_reason() {
     let app = test_app();
     let temp = tempfile::tempdir().expect("tempdir");
