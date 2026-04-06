@@ -172,7 +172,13 @@ impl ScanRepository for PgScanRepository {
     }
 
     async fn delete_scan(&self, scan_id: Uuid) -> Result<bool, ScanRepositoryError> {
-        let rows_affected = sqlx::query("DELETE FROM scan_sessions WHERE id = $1")
+        let rows_affected = sqlx::query(
+            "DELETE FROM scan_sessions \
+             WHERE id = $1 \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM audit_sessions WHERE audit_sessions.scan_id = scan_sessions.id \
+               )",
+        )
             .bind(scan_id)
             .execute(&self.pool)
             .await
@@ -183,7 +189,13 @@ impl ScanRepository for PgScanRepository {
 
     async fn prune_expired(&self, now: SystemTime) -> Result<(), ScanRepositoryError> {
         let now: DateTime<Utc> = now.into();
-        sqlx::query("DELETE FROM scan_sessions WHERE expires_at <= $1")
+        sqlx::query(
+            "DELETE FROM scan_sessions \
+             WHERE expires_at <= $1 \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM audit_sessions WHERE audit_sessions.scan_id = scan_sessions.id \
+               )",
+        )
             .bind(now)
             .execute(&self.pool)
             .await
