@@ -1256,6 +1256,107 @@ async fn post_execute_movie_provider_ids_mode_keeps_provider_tags_in_folder_and_
 }
 
 #[tokio::test]
+async fn post_execute_movie_merge_handles_duplicate_primary_files_without_target_collisions() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "Ghostbusters (1984) [tmdbid-620]";
+    let source_b = "Ghostbusters (1984) - [imdb-tt0087332]";
+
+    std::fs::create_dir(temp.path().join(source_a)).expect("create source a");
+    std::fs::create_dir(temp.path().join(source_b)).expect("create source b");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Ghostbusters (1984) [tmdbid-620].mkv"),
+        "video-a",
+    )
+    .expect("write movie a");
+    std::fs::write(
+        temp.path()
+            .join(source_b)
+            .join("Ghostbusters (1984) - [imdb-tt0087332].mkv"),
+        "video-b",
+    )
+    .expect("write movie b");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Ghostbusters (1984) [tmdbid-620].nfo"),
+        "<movie />",
+    )
+    .expect("write nfo a");
+    std::fs::write(
+        temp.path()
+            .join(source_b)
+            .join("Ghostbusters (1984) - [imdb-tt0087332].nfo"),
+        "<movie />",
+    )
+    .expect("write nfo b");
+
+    let scan_id =
+        create_scan_with_media_type(&app, &temp.path().display().to_string(), "movie").await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"ghostbusters-duplicate-primary-files","media_type":"movie","base_path":"{}","name_overrides":[],"conflict_resolutions":[{{"normalized_name":"Ghostbusters (1984)","selected_source_directory":"{}"}}],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..200 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let canonical_dir = temp.path().join("Ghostbusters (1984)");
+    assert!(canonical_dir.join("Ghostbusters (1984).mkv").is_file());
+    assert!(canonical_dir.join("movie.nfo").is_file());
+    assert!(
+        canonical_dir
+            .join("Ghostbusters (1984) [tmdbid-620].mkv")
+            .is_file()
+    );
+    assert!(
+        canonical_dir
+            .join("Ghostbusters (1984) [tmdbid-620].nfo")
+            .is_file()
+    );
+}
+
+#[tokio::test]
 async fn post_execute_merges_duplicate_tv_folders_into_selected_source() {
     let app = test_app();
     let temp = tempfile::tempdir().expect("tempdir");

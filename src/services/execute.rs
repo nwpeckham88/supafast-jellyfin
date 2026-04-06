@@ -585,6 +585,11 @@ fn build_plan(
         })
         .collect::<Vec<_>>();
 
+    let mut operations = operations;
+    if request.media_type == "movie" {
+        resolve_movie_file_target_collisions(&mut operations);
+    }
+
     let mut operations = append_trickplay_companion_operations(operations);
     sort_plan_operations(&mut operations);
     for (index, operation) in operations.iter_mut().enumerate() {
@@ -1076,6 +1081,101 @@ fn sort_plan_operations(operations: &mut [PlanOperation]) {
             .then_with(|| left.target_path.cmp(&right.target_path))
             .then_with(|| left.source_path.cmp(&right.source_path))
     });
+}
+
+fn resolve_movie_file_target_collisions(operations: &mut [PlanOperation]) {
+    let mut target_groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, operation) in operations.iter().enumerate() {
+        if !matches!(operation.op_type, PlanOpType::RenameFile | PlanOpType::MoveFile) {
+            continue;
+        }
+
+        target_groups
+            .entry(operation.target_path.clone())
+            .or_default()
+            .push(index);
+    }
+
+    if !target_groups.values().any(|indices| indices.len() > 1) {
+        return;
+    }
+
+    let mut taken_targets = operations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| {
+            let group = target_groups.get(&operation.target_path)?;
+            (group.len() == 1).then_some((index, operation.target_path.clone()))
+        })
+        .collect::<HashMap<usize, String>>();
+
+    for indices in target_groups.values_mut() {
+        if indices.len() <= 1 {
+            continue;
+        }
+
+        indices.sort_by(|left, right| {
+            movie_collision_priority(&operations[*left])
+                .cmp(&movie_collision_priority(&operations[*right]))
+                .then_with(|| operations[*left].source_path.cmp(&operations[*right].source_path))
+        });
+
+        let keeper = indices[0];
+        taken_targets.insert(keeper, operations[keeper].target_path.clone());
+
+        for index in indices.iter().copied().skip(1) {
+            let fallback_target =
+                allocate_unique_movie_collision_target(&operations[index], taken_targets.values());
+            operations[index].target_path = fallback_target.clone();
+            taken_targets.insert(index, fallback_target);
+        }
+    }
+}
+
+fn movie_collision_priority(operation: &PlanOperation) -> u8 {
+    match operation.op_type {
+        PlanOpType::RenameFile => 0,
+        PlanOpType::MoveFile => 1,
+        _ => 2,
+    }
+}
+
+fn allocate_unique_movie_collision_target<'a>(
+    operation: &PlanOperation,
+    taken_targets: impl IntoIterator<Item = &'a String>,
+) -> String {
+    let taken = taken_targets
+        .into_iter()
+        .map(|path| path.as_str())
+        .collect::<HashSet<_>>();
+
+    let source_path = Path::new(&operation.source_path);
+    let target_path = Path::new(&operation.target_path);
+    let parent = target_path
+        .parent()
+        .expect("movie collision target should have parent");
+    let source_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("duplicate");
+
+    let original_target = parent.join(source_name).to_string_lossy().to_string();
+    if !taken.contains(original_target.as_str()) && original_target != operation.target_path {
+        return original_target;
+    }
+
+    let (stem, suffix) = split_movie_stem_and_suffix(source_name);
+    for index in 2..1000 {
+        let candidate = parent
+            .join(format!("{stem} ({index}){suffix}"))
+            .to_string_lossy()
+            .to_string();
+        if !taken.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+
+    operation.target_path.clone()
 }
 
 fn is_episode_container_dir(path: &Path) -> bool {
