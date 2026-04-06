@@ -1,6 +1,7 @@
 pub fn normalize_directory_name(input: &str) -> String {
     let without_brackets = strip_bracket_groups(input);
-    let normalized_separators = without_brackets.replace(':', " - ").replace('_', " ");
+    let normalized_punctuation = normalize_punctuation(&without_brackets);
+    let normalized_separators = normalized_punctuation.replace('_', " ");
     let collapsed = collapse_whitespace(&normalized_separators);
     let cleaned_for_year = trim_trailing_separators(&collapsed);
 
@@ -129,9 +130,27 @@ fn is_year(value: &str) -> bool {
 
 fn is_metadata_tag(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    lower.starts_with("tmdbid-") || lower.starts_with("tvdbid-") || lower.starts_with("imdbid-")
+    lower.starts_with("tmdbid-")
+        || lower.starts_with("tvdbid-")
+        || lower.starts_with("imdbid-")
+        || lower.starts_with("imdb-tt")
+        || lower.starts_with("imdb-")
 }
 
 fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_punctuation(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            ':' | '∶' | '：' => out.push_str(" - "),
+            '’' | '‘' | 'ʼ' | 'ˈ' | '´' | '`' => out.push('\''),
+            '–' | '—' | '−' => out.push('-'),
+            _ => out.push(ch),
+        }
+    }
+
+    out
 }

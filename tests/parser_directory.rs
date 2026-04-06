@@ -24,6 +24,14 @@ fn normalizes_verified_directory_examples() {
             "Spider-Man: Into the Spider-Verse (2018)",
             "Spider-Man - Into the Spider-Verse (2018)",
         ),
+        (
+            "TRON∶ Ares (2025) - [imdb-tt6604188]",
+            "TRON - Ares (2025)",
+        ),
+        (
+            "Now You See Me∶ Now You Donˈt (2025) - [imdb-tt4712810]",
+            "Now You See Me - Now You Don't (2025)",
+        ),
     ];
 
     for (input, expected) in cases {

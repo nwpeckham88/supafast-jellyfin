@@ -24,6 +24,10 @@ use crate::{
     repositories::execute_repo::{
         ClaimJobResult, ExecuteRepository, ExecuteRepositoryError, JobRecord,
     },
+    parsers::{
+        episode::normalize_episode_filename_with_nfo,
+        season::normalize_season_directory_name,
+    },
     safety::{base_path_lock::BasePathLockManager, path_guard},
     services::scan::ScanService,
 };
@@ -423,10 +427,11 @@ fn build_plan(
         })
         .collect();
 
-    let mut operations = Vec::new();
+    let mut operation_candidates = Vec::new();
 
     for group in &scan.groups {
-        if let Some(selected) = conflict_resolutions.get(group.normalized_name.as_str()) {
+        let selected = conflict_resolutions.get(group.normalized_name.as_str()).copied();
+        if let Some(selected) = selected {
             if !group
                 .source_directories
                 .iter()
@@ -437,8 +442,28 @@ fn build_plan(
         }
 
         for source_directory in &group.source_directories {
-            if let Some(selected) = conflict_resolutions.get(group.normalized_name.as_str()) {
+            if let Some(selected) = selected {
                 if source_directory != selected {
+                    let source_relative = parse_relative_component(source_directory)?;
+                    let source_path =
+                        path_guard::resolve_under_base(&canonical_base, &source_relative)
+                            .map_err(|_| ExecuteServiceError::Preflight)?;
+
+                    let merge_target_relative = parse_relative_component(selected)?;
+                    let merge_target_path = path_guard::resolve_under_base(
+                        &canonical_base,
+                        &merge_target_relative,
+                    )
+                    .map_err(|_| ExecuteServiceError::Preflight)?;
+
+                    operation_candidates.extend(
+                        build_group_merge_operations(
+                            &source_path,
+                            &merge_target_path,
+                            &request.media_type,
+                        )
+                        .map_err(|_| ExecuteServiceError::Preflight)?,
+                    );
                     continue;
                 }
             }
@@ -459,34 +484,49 @@ fn build_plan(
             let target_path = path_guard::resolve_under_base(&canonical_base, &target_relative)
                 .map_err(|_| ExecuteServiceError::Preflight)?;
 
-            operations.push((
+            if request.media_type == "tv" {
+                operation_candidates.extend(
+                    build_tv_nested_operations(&source_path)
+                        .map_err(|_| ExecuteServiceError::Preflight)?,
+                );
+            }
+
+            operation_candidates.push((
                 source_directory.clone(),
                 target_directory.to_string(),
+                PlanOpType::RenameDir,
                 source_path,
                 target_path,
             ));
         }
     }
 
-    operations.sort_by(|left, right| {
-        left.1
-            .cmp(&right.1)
+    operation_candidates.sort_by(|left, right| {
+        let left_depth = left.3.components().count();
+        let right_depth = right.3.components().count();
+
+        right_depth
+            .cmp(&left_depth)
+            .then_with(|| op_type_rank(left.2).cmp(&op_type_rank(right.2)))
+            .then_with(|| left.1.cmp(&right.1))
             .then_with(|| left.0.cmp(&right.0))
-            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.3.cmp(&right.3))
+            .then_with(|| left.4.cmp(&right.4))
     });
 
-    let operations = operations
+    let operations = operation_candidates
         .into_iter()
-        .map(|(_, _, source_path, target_path)| PlanOperation {
+        .map(|(_, _, op_type, source_path, target_path)| PlanOperation {
             op_id: Uuid::nil(),
             op_index: 0,
-            op_type: PlanOpType::RenameDir,
+            op_type,
             source_path: source_path.to_string_lossy().to_string(),
             target_path: target_path.to_string_lossy().to_string(),
         })
         .collect::<Vec<_>>();
 
     let mut operations = append_trickplay_companion_operations(operations);
+    sort_plan_operations(&mut operations);
     for (index, operation) in operations.iter_mut().enumerate() {
         operation.op_id = Uuid::from_u128((index + 1) as u128);
         operation.op_index = index;
@@ -507,6 +547,161 @@ fn build_plan(
         media_type: request.media_type.clone(),
         operations,
     })
+}
+
+fn build_group_merge_operations(
+    source_group_path: &Path,
+    target_group_path: &Path,
+    media_type: &str,
+) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
+    let mut operations = Vec::new();
+
+    for entry in std::fs::read_dir(source_group_path)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let source_name = entry.file_name().to_string_lossy().to_string();
+
+        if source_name.starts_with('.') {
+            continue;
+        }
+
+        let target_name = if media_type == "tv" && source_path.is_dir() {
+            normalize_season_directory_name(&source_name)
+        } else if media_type == "tv"
+            && source_path.is_file()
+            && is_episode_container_dir(source_group_path)
+        {
+            normalize_episode_filename_with_nfo(source_group_path, &source_name)
+        } else {
+            source_name.clone()
+        };
+
+        let target_path = target_group_path.join(target_name.clone());
+        if source_path == target_path {
+            continue;
+        }
+
+        let op_type = if source_path.is_dir() {
+            PlanOpType::RenameDir
+        } else {
+            PlanOpType::RenameFile
+        };
+
+        if op_type == PlanOpType::RenameDir && target_path.exists() {
+            operations.extend(build_group_merge_operations(
+                &source_path,
+                &target_path,
+                media_type,
+            )?);
+            continue;
+        }
+
+        if op_type == PlanOpType::RenameDir
+            && media_type == "tv"
+            && is_episode_container_dir(&source_path)
+        {
+            operations.extend(build_episode_file_rename_ops(&source_path)?);
+        }
+
+        operations.push((
+            source_name,
+            target_name,
+            op_type,
+            source_path,
+            target_path,
+        ));
+    }
+
+    Ok(operations)
+}
+
+fn build_tv_nested_operations(
+    source_show_path: &Path,
+) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
+    let mut nested = build_tv_episode_file_operations(source_show_path)?;
+
+    for season_entry in std::fs::read_dir(source_show_path)? {
+        let season_entry = season_entry?;
+        let season_path = season_entry.path();
+        if !season_path.is_dir() {
+            continue;
+        }
+
+        let season_name = season_entry.file_name().to_string_lossy().to_string();
+        if is_ignored_nested_directory(&season_name) {
+            continue;
+        }
+
+        let normalized_season = normalize_season_directory_name(&season_name);
+
+        if normalized_season != season_name {
+            let target_season = source_show_path.join(&normalized_season);
+            nested.push((
+                season_name.clone(),
+                normalized_season,
+                PlanOpType::RenameDir,
+                season_path,
+                target_season,
+            ));
+        }
+    }
+
+    Ok(nested)
+}
+
+fn build_tv_episode_file_operations(
+    source_show_path: &Path,
+) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
+    let mut operations = Vec::new();
+
+    for season_entry in std::fs::read_dir(source_show_path)? {
+        let season_entry = season_entry?;
+        let season_path = season_entry.path();
+        if !season_path.is_dir() {
+            continue;
+        }
+
+        let season_name = season_entry.file_name().to_string_lossy().to_string();
+        if is_ignored_nested_directory(&season_name) {
+            continue;
+        }
+
+        for episode_entry in std::fs::read_dir(&season_path)? {
+            let episode_entry = episode_entry?;
+            let episode_path = episode_entry.path();
+            if !episode_path.is_file() {
+                continue;
+            }
+
+            let episode_name = episode_entry.file_name().to_string_lossy().to_string();
+            let normalized_episode = normalize_episode_filename_with_nfo(&season_path, &episode_name);
+            if normalized_episode == episode_name {
+                continue;
+            }
+
+            let target_episode = season_path.join(normalized_episode);
+            operations.push((
+                season_name.clone(),
+                episode_name,
+                PlanOpType::RenameFile,
+                episode_path,
+                target_episode,
+            ));
+        }
+    }
+
+    Ok(operations)
+}
+
+fn op_type_rank(op_type: PlanOpType) -> u8 {
+    match op_type {
+        PlanOpType::RenameFile => 0,
+        PlanOpType::RenameDir => 1,
+    }
+}
+
+fn is_ignored_nested_directory(name: &str) -> bool {
+    name.starts_with('.') || name.ends_with(".trickplay")
 }
 
 fn parse_relative_component(value: &str) -> Result<PathBuf, ExecuteServiceError> {
@@ -685,15 +880,7 @@ fn map_plan_op_type(op_type: PlanOpType) -> &'static str {
 }
 
 fn validate_plan_for_media_type(plan: &NormalizePlan) -> Result<(), ExecuteServiceError> {
-    if plan.media_type == "movie"
-        && plan
-            .operations
-            .iter()
-            .any(|operation| operation.op_type != PlanOpType::RenameDir)
-    {
-        return Err(ExecuteServiceError::Preflight);
-    }
-
+    let _ = plan;
     Ok(())
 }
 
@@ -720,6 +907,66 @@ fn append_trickplay_companion_operations(operations: Vec<PlanOperation>) -> Vec<
 
     output.extend(companion_ops);
     output
+}
+
+fn sort_plan_operations(operations: &mut [PlanOperation]) {
+    operations.sort_by(|left, right| {
+        let left_depth = Path::new(&left.source_path).components().count();
+        let right_depth = Path::new(&right.source_path).components().count();
+
+        right_depth
+            .cmp(&left_depth)
+            .then_with(|| op_type_rank(left.op_type).cmp(&op_type_rank(right.op_type)))
+            .then_with(|| left.target_path.cmp(&right.target_path))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+    });
+}
+
+fn is_episode_container_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    let lower = name.to_ascii_lowercase();
+    if lower == "specials" {
+        return true;
+    }
+
+    if lower.starts_with("season ") {
+        return true;
+    }
+
+    lower.len() > 1 && lower.starts_with('s') && lower[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+fn build_episode_file_rename_ops(
+    season_dir: &Path,
+) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
+    let mut operations = Vec::new();
+
+    for entry in std::fs::read_dir(season_dir)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        if !source_path.is_file() {
+            continue;
+        }
+
+        let source_name = entry.file_name().to_string_lossy().to_string();
+        let target_name = normalize_episode_filename_with_nfo(season_dir, &source_name);
+        if target_name == source_name {
+            continue;
+        }
+
+        operations.push((
+            source_name.clone(),
+            target_name.clone(),
+            PlanOpType::RenameFile,
+            source_path,
+            season_dir.join(target_name),
+        ));
+    }
+
+    Ok(operations)
 }
 
 fn summarize_job(job: &JobRecord) -> NormalizeJobSummary {

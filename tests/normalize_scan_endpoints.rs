@@ -228,6 +228,48 @@ async fn post_scan_accepts_movie_media_type() {
 }
 
 #[tokio::test]
+async fn post_scan_ignores_hidden_and_trickplay_directories() {
+    let app = test_app();
+    let temp = tempdir().expect("temp dir");
+    std::fs::create_dir(temp.path().join("The Studio 2025 - [tmdbid-239001]"))
+        .expect("create show dir");
+    std::fs::create_dir(temp.path().join(".deletedByTMM")).expect("create hidden dir");
+    std::fs::create_dir(temp.path().join("The Studio 2025 - [tmdbid-239001].trickplay"))
+        .expect("create trickplay dir");
+
+    let request_body = format!(
+        r#"{{"media_type":"tv","base_path":"{}"}}"#,
+        temp.path().display()
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/scan")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = parse_json(response).await;
+    let groups = body["data"]["groups"].as_array().expect("groups array");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["normalized_name"], Value::String("The Studio (2025)".to_string()));
+    let sources = groups[0]["source_directories"]
+        .as_array()
+        .expect("source directories");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(
+        sources[0],
+        Value::String("The Studio 2025 - [tmdbid-239001]".to_string())
+    );
+}
+
+#[tokio::test]
 async fn accepts_base_path_override_within_configured_media_root() {
     let temp = tempdir().expect("temp dir");
     let tv_root = temp.path().join("tv");

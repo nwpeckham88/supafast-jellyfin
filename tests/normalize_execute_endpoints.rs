@@ -125,6 +125,155 @@ async fn post_execute_movie_mode_renames_directory_only() {
 }
 
 #[tokio::test]
+async fn post_execute_tv_one_pass_normalizes_show_season_and_episode_names() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let show_dir = temp.path().join("My Show 2020 - [tmdbid-9999]");
+    let season_dir = show_dir.join("Season 01");
+    std::fs::create_dir_all(&season_dir).expect("create season dir");
+    std::fs::write(
+        season_dir.join("My Show - S01E01 - Pilot [WEBDL-1080p][h264]-GROUP.mkv"),
+        "video",
+    )
+    .expect("create episode file");
+    std::fs::write(
+        season_dir.join("My Show S01E02 1080p WEB h264-GROUP.mkv"),
+        "video",
+    )
+    .expect("create noisy episode file");
+    std::fs::write(
+        season_dir.join("My Show S01E02 1080p WEB h264-GROUP.nfo"),
+        r#"<episodedetails><season>1</season><episode>2</episode><title>Second Episode</title></episodedetails>"#,
+    )
+    .expect("create sidecar nfo");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"tv-one-pass","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..100 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let expected_show = temp.path().join("My Show (2020)");
+    let expected_season = expected_show.join("Season 1");
+    let expected_episode = expected_season.join("01x01 - Pilot.mkv");
+    let expected_episode_two = expected_season.join("01x02 - Second Episode.mkv");
+    let expected_nfo_two = expected_season.join("01x02 - Second Episode.nfo");
+
+    assert!(expected_show.is_dir(), "expected show directory to be normalized");
+    assert!(expected_season.is_dir(), "expected season directory to be normalized");
+    assert!(expected_episode.is_file(), "expected episode filename to be normalized");
+    assert!(
+        expected_episode_two.is_file(),
+        "expected noisy episode filename to use sidecar metadata"
+    );
+    assert!(
+        expected_nfo_two.is_file(),
+        "expected sidecar nfo filename to use sidecar metadata"
+    );
+}
+
+#[tokio::test]
+async fn post_execute_tv_one_pass_renames_season_trickplay_with_show_rename() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let show_dir = temp.path().join("My Show 2020 - [tmdbid-9999]");
+    let season_dir = show_dir.join("Season 01");
+    std::fs::create_dir_all(&season_dir).expect("create season dir");
+    std::fs::create_dir(season_dir.with_extension("trickplay"))
+        .expect("create season trickplay dir");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"tv-trickplay-order","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..200 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let expected_show = temp.path().join("My Show (2020)");
+    let expected_trickplay = expected_show.join("Season 1.trickplay");
+    assert!(expected_trickplay.is_dir(), "expected season trickplay to be renamed");
+}
+
+#[tokio::test]
 async fn list_jobs_returns_paginated_results_with_meta() {
     let app = test_app();
     let mut temp_dirs = Vec::new();
@@ -561,6 +710,232 @@ async fn post_execute_rejects_preflight_collision_with_409() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn post_execute_merges_duplicate_movie_folders_into_selected_source() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "TRON∶ Ares (2025) - [imdb-tt6604188]";
+    let source_b = "TRON - Ares (2025) - [imdb-tt6604188]";
+    let canonical = "TRON - Ares (2025)";
+
+    std::fs::create_dir(temp.path().join(source_a)).expect("create source a");
+    std::fs::create_dir(temp.path().join(source_b)).expect("create source b");
+    std::fs::write(temp.path().join(source_a).join("a.mkv"), "a").expect("file a");
+    std::fs::write(temp.path().join(source_b).join("b.mkv"), "b").expect("file b");
+
+    let scan_id = create_scan_with_media_type(&app, &temp.path().display().to_string(), "movie").await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"movie-merge","media_type":"movie","base_path":"{}","name_overrides":[],"conflict_resolutions":[{{"normalized_name":"TRON - Ares (2025)","selected_source_directory":"{}"}}],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..200 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    assert!(temp.path().join(canonical).join("a.mkv").is_file());
+    assert!(temp.path().join(canonical).join("b.mkv").is_file());
+    assert!(!temp.path().join(source_a).join("a.mkv").exists());
+}
+
+#[tokio::test]
+async fn post_execute_merges_duplicate_tv_folders_into_selected_source() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "My Show∶ Home (2020) - [imdb-tt1234567]";
+    let source_b = "My Show - Home (2020) - [imdb-tt1234567]";
+    let canonical = "My Show - Home (2020)";
+
+    std::fs::create_dir_all(temp.path().join(source_a).join("Season 01")).expect("create source a season");
+    std::fs::create_dir_all(temp.path().join(source_b).join("Season 02")).expect("create source b season");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Season 01")
+            .join("My Show - S01E01 - Pilot [tmdbid-1].mkv"),
+        "a",
+    )
+    .expect("file a");
+    std::fs::write(
+        temp.path()
+            .join(source_b)
+            .join("Season 02")
+            .join("My Show - S02E01 - Return [tmdbid-1].mkv"),
+        "b",
+    )
+    .expect("file b");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"tv-merge","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[{{"normalized_name":"My Show - Home (2020)","selected_source_directory":"{}"}}],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..200 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let expected_show = temp.path().join(canonical);
+    assert!(expected_show.join("Season 1").is_dir());
+    assert!(expected_show.join("Season 2").is_dir());
+    assert!(expected_show.join("Season 1").join("01x01 - Pilot.mkv").is_file());
+    assert!(expected_show.join("Season 2").join("02x01 - Return.mkv").is_file());
+}
+
+#[tokio::test]
+async fn post_execute_merges_duplicate_tv_folders_with_overlapping_seasons() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "Merge Show∶ Home (2021) - [imdb-tt2222222]";
+    let source_b = "Merge Show - Home (2021) - [imdb-tt2222222]";
+    let canonical = "Merge Show - Home (2021)";
+
+    std::fs::create_dir_all(temp.path().join(source_a).join("Season 01")).expect("create source a season");
+    std::fs::create_dir_all(temp.path().join(source_b).join("Season 1")).expect("create source b season");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Season 01")
+            .join("Merge Show - S01E01 - Pilot [tmdbid-1].mkv"),
+        "a",
+    )
+    .expect("file a");
+    std::fs::write(
+        temp.path()
+            .join(source_b)
+            .join("Season 1")
+            .join("Merge Show - S01E02 - Return [tmdbid-1].mkv"),
+        "b",
+    )
+    .expect("file b");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"tv-merge-overlap-season","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[{{"normalized_name":"Merge Show - Home (2021)","selected_source_directory":"{}"}}],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..250 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let expected_show = temp.path().join(canonical);
+    assert!(expected_show.join("Season 1").is_dir());
+    assert!(expected_show.join("Season 1").join("01x01 - Pilot.mkv").is_file());
+    assert!(expected_show.join("Season 1").join("01x02 - Return.mkv").is_file());
 }
 
 #[tokio::test]

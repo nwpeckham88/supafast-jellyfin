@@ -165,6 +165,10 @@ fn build_groups_from_base_path(base_path: &Path) -> Result<Vec<ScanGroup>, ScanS
         }
 
         let source_directory = entry.file_name().to_string_lossy().into_owned();
+        if is_ignored_scan_directory(&source_directory) {
+            continue;
+        }
+
         let normalized_name = normalize_directory_name(&source_directory);
         grouped
             .entry(normalized_name)
@@ -185,4 +189,8 @@ fn build_groups_from_base_path(base_path: &Path) -> Result<Vec<ScanGroup>, ScanS
 
     groups.sort_by(|left, right| left.normalized_name.cmp(&right.normalized_name));
     Ok(groups)
+}
+
+fn is_ignored_scan_directory(name: &str) -> bool {
+    name.starts_with('.') || name.ends_with(".trickplay")
 }
