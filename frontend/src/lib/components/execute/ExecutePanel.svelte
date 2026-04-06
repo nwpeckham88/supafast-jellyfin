@@ -17,6 +17,7 @@
     loadingEntries: boolean;
     error: string | null;
     onIdempotencyKeyChange: (value: string) => void;
+    onGenerateIdempotencyKey: () => void;
     onDryRun: () => void;
     onExecute: () => void;
     onRefreshStatus: () => void;
@@ -41,6 +42,7 @@
     loadingEntries,
     error,
     onIdempotencyKeyChange,
+    onGenerateIdempotencyKey,
     onDryRun,
     onExecute,
     onRefreshStatus,
@@ -106,16 +108,25 @@
 
   <label class="text-sm font-medium text-slate-800" for="execute-idempotency-key">
     Idempotency Key
-    <input
-      class="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
-      id="execute-idempotency-key"
-      maxlength="128"
-      oninput={(event) =>
-        onIdempotencyKeyChange((event.currentTarget as HTMLInputElement).value)}
-      placeholder="normalize-2026-04-04-001"
-      type="text"
-      value={idempotencyKey}
-    />
+    <div class="mt-2 flex flex-wrap items-center gap-2">
+      <input
+        class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 sm:flex-1"
+        id="execute-idempotency-key"
+        maxlength="128"
+        oninput={(event) =>
+          onIdempotencyKeyChange((event.currentTarget as HTMLInputElement).value)}
+        placeholder="normalize-2026-04-04-001"
+        type="text"
+        value={idempotencyKey}
+      />
+      <button
+        class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100"
+        type="button"
+        onclick={onGenerateIdempotencyKey}
+      >
+        Generate UUID
+      </button>
+    </div>
   </label>
   <p class="mt-2 text-xs text-slate-600">
     Reuse the same key to safely replay status without re-applying filesystem operations.

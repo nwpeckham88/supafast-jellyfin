@@ -14,6 +14,7 @@ import type {
   ScanResult
 } from '$lib/models/normalize';
 import { notificationsStore } from '$lib/stores/notifications';
+import { generateUuid } from '$lib/utils/idempotency';
 
 interface ExecuteStartInput {
   scanResult: ScanResult | null;
@@ -161,6 +162,9 @@ function createExecuteStore() {
     subscribe,
     setIdempotencyKey(idempotencyKey: string) {
       update((state) => ({ ...state, idempotencyKey }));
+    },
+    generateIdempotencyKey() {
+      update((state) => ({ ...state, idempotencyKey: generateUuid() }));
     },
     syncFromScan(scanResult: ScanResult | null) {
       if (!scanResult) {

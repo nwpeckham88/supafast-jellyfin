@@ -11,6 +11,7 @@ import type {
   RollbackSessionSummary
 } from '$lib/models/normalize';
 import { notificationsStore } from '$lib/stores/notifications';
+import { generateUuid } from '$lib/utils/idempotency';
 
 export interface RollbackStoreState {
   sessions: RollbackSessionSummary[];
@@ -101,6 +102,9 @@ function createRollbackStore() {
     },
     setIdempotencyKey(idempotencyKey: string) {
       update((state) => ({ ...state, idempotencyKey }));
+    },
+    generateIdempotencyKey() {
+      update((state) => ({ ...state, idempotencyKey: generateUuid() }));
     },
     async refreshSessions() {
       await refreshSessionsInternal();

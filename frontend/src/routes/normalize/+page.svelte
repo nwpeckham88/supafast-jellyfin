@@ -184,6 +184,7 @@
         selections={$conflictSelections}
         unresolvedCount={$unresolvedCount}
         onChoose={(conflictId, candidateId) => conflictsStore.choose(conflictId, candidateId)}
+        onAutoSelectLikelyBest={() => conflictsStore.autoSelectLikelyBest()}
         onReset={() => conflictsStore.reset()}
       />
     </div>
@@ -205,6 +206,7 @@
         loadingEntries={$executeStore.loadingEntries}
         error={$executeStore.error}
         onIdempotencyKeyChange={(value) => executeStore.setIdempotencyKey(value)}
+        onGenerateIdempotencyKey={() => executeStore.generateIdempotencyKey()}
         onDryRun={() =>
           executeStore.startExecute({
             scanResult: $scanStore.scanResult,
@@ -242,6 +244,7 @@
         error={$rollbackStore.error}
         onSelectSession={(value) => rollbackStore.setSelectedSession(value)}
         onIdempotencyKeyChange={(value) => rollbackStore.setIdempotencyKey(value)}
+        onGenerateIdempotencyKey={() => rollbackStore.generateIdempotencyKey()}
         onRefreshSessions={() => rollbackStore.refreshSessions()}
         onPreviousSessionsPage={() => rollbackStore.previousSessionsPage()}
         onNextSessionsPage={() => rollbackStore.nextSessionsPage()}

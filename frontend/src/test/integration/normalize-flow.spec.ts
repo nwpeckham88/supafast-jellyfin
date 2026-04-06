@@ -50,7 +50,7 @@ describe('normalize page flow', () => {
       '/api/normalize/scan',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ media_type: 'tv' })
+        body: JSON.stringify({ media_type: 'tv', base_path: '/media/tv' })
       })
     );
   });
@@ -103,7 +103,7 @@ describe('normalize page flow', () => {
       '/api/normalize/scan',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ media_type: 'tv' })
+        body: JSON.stringify({ media_type: 'tv', base_path: '/media/tv' })
       })
     );
   });

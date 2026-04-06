@@ -6,6 +6,7 @@
     selections?: Record<string, string>;
     unresolvedCount?: number;
     onChoose: (conflictId: string, candidateId: string) => void;
+    onAutoSelectLikelyBest: () => void;
     onReset: () => void;
   }
 
@@ -14,6 +15,7 @@
     selections = {},
     unresolvedCount = 0,
     onChoose,
+    onAutoSelectLikelyBest,
     onReset
   }: Props = $props();
 </script>
@@ -25,6 +27,14 @@
       <span class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-900">
         Unresolved: {unresolvedCount}
       </span>
+      <button
+        class="rounded border border-teal-300 bg-teal-50 px-3 py-1 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+        type="button"
+        disabled={conflicts.length === 0}
+        onclick={onAutoSelectLikelyBest}
+      >
+        Auto-Select Likely Best
+      </button>
       <button
         class="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-800 hover:bg-slate-100"
         type="button"

@@ -7,6 +7,19 @@ type Selections = Record<string, string>;
 const conflictItems = writable<ConflictItem[]>([]);
 const selections = writable<Selections>({});
 
+const QUALITY_TOKENS: Array<{ pattern: RegExp; score: number }> = [
+  { pattern: /\b(4320p|8k)\b/i, score: 500 },
+  { pattern: /\b(2160p|4k|uhd)\b/i, score: 400 },
+  { pattern: /\b(1440p|2k)\b/i, score: 300 },
+  { pattern: /\b1080p\b/i, score: 200 },
+  { pattern: /\b720p\b/i, score: 120 },
+  { pattern: /\b480p\b/i, score: 60 },
+  { pattern: /\b(hevc|x265|h265|av1)\b/i, score: 45 },
+  { pattern: /\b(h264|x264|avc)\b/i, score: 25 },
+  { pattern: /\b(remux|bluray|blu-ray)\b/i, score: 35 },
+  { pattern: /\b(web-?dl|webdl|webrip)\b/i, score: 20 }
+];
+
 export function buildConflictsFromScan(scanResult: ScanResult | null): ConflictItem[] {
   if (!scanResult) {
     return [];
@@ -34,6 +47,33 @@ export function prioritizeConflictGroups(groups: ScanGroup[]): ScanGroup[] {
     .sort((left, right) => left.normalized_name.localeCompare(right.normalized_name));
 
   return [...conflictGroups, ...nonConflictGroups];
+}
+
+export function scoreCandidateForQuality(candidateLabel: string): number {
+  const normalized = candidateLabel.toLowerCase();
+
+  return QUALITY_TOKENS.reduce((sum, token) => {
+    return sum + (token.pattern.test(normalized) ? token.score : 0);
+  }, 0);
+}
+
+function pickLikelyBestCandidateId(conflict: ConflictItem): string | null {
+  if (conflict.candidates.length === 0) {
+    return null;
+  }
+
+  let bestId: string | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const candidate of conflict.candidates) {
+    const score = scoreCandidateForQuality(candidate.sourceDirectory);
+    if (score > bestScore) {
+      bestScore = score;
+      bestId = candidate.id;
+    }
+  }
+
+  return bestId;
 }
 
 export const conflictsStore = {
@@ -68,6 +108,30 @@ export const conflictsStore = {
   },
   choose(conflictId: string, candidateId: string) {
     selections.update((state) => ({ ...state, [conflictId]: candidateId }));
+  },
+  autoSelectLikelyBest() {
+    let itemsSnapshot: ConflictItem[] = [];
+    const unsubscribe = conflictItems.subscribe((items) => {
+      itemsSnapshot = items;
+    });
+    unsubscribe();
+
+    selections.update((state) => {
+      const next = { ...state };
+
+      for (const item of itemsSnapshot) {
+        if (next[item.id]) {
+          continue;
+        }
+
+        const likelyBest = pickLikelyBestCandidateId(item);
+        if (likelyBest) {
+          next[item.id] = likelyBest;
+        }
+      }
+
+      return next;
+    });
   },
   reset() {
     selections.set({});
