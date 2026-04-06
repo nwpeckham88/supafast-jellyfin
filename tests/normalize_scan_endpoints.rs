@@ -9,6 +9,7 @@ use serde_json::Value;
 use supafast_jellyfin::{
     config::AppConfig,
     http::build_app,
+    models::execute::MovieRenameMode,
     repositories::scan_repo::{ScanRepository, ScanRepositoryError, ScanSessionRecord},
     services::scan::{InMemoryScanService, ScanService},
     state::AppState,
@@ -54,8 +55,9 @@ fn test_app_with_media_roots(
         port: 3001,
         scan_ttl_minutes,
         follow_symlinks: false,
+        movie_rename_mode: MovieRenameMode::Clean,
     };
-    let state = AppState::new(config, scan_service);
+    let state = AppState::new(config, scan_service, None);
     build_app(state)
 }
 
@@ -624,6 +626,159 @@ async fn post_scan_reports_zero_merges_when_no_duplicates_exist() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn post_scan_counts_tv_episode_slots_and_auto_selects_equivalent_candidates() {
+    let temp = tempdir().expect("temp dir");
+    let base_path = temp.path();
+    let app = test_app_with_media_roots(
+        60,
+        Arc::new(InMemoryScanService::new()) as Arc<dyn ScanService>,
+        base_path.to_path_buf(),
+        base_path.to_path_buf(),
+    );
+
+    let source_a = base_path.join("Quality Show 2024 - [tmdbid-1]");
+    let source_b = base_path.join("Quality Show - 2024 [tvdbid-2]");
+    std::fs::create_dir_all(source_a.join("Season 01")).expect("create source a season");
+    std::fs::create_dir_all(source_b.join("Season 1")).expect("create source b season");
+    std::fs::write(
+        source_a
+            .join("Season 01")
+            .join("Quality Show - S01E01 - Pilot [WEBDL-1080p][h264]-AAA.mkv"),
+        vec![0_u8; 100],
+    )
+    .expect("write source a episode");
+    std::fs::write(
+        source_b
+            .join("Season 1")
+            .join("Quality Show - S01E01 - Pilot [WEB-DL-1080p][h264]-BBB.mkv"),
+        vec![0_u8; 103],
+    )
+    .expect("write source b equivalent episode");
+    std::fs::write(
+        source_b
+            .join("Season 1")
+            .join("Quality Show - S01E02 - Return [WEBDL-1080p][h264]-BBB.mkv"),
+        vec![0_u8; 120],
+    )
+    .expect("write source b second episode");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/scan")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"media_type":"tv"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = parse_json(response).await;
+
+    assert_eq!(body["data"]["summary"]["total_episodes"], Value::from(2));
+    assert_eq!(body["data"]["summary"]["conflicts"], Value::from(0));
+
+    let group = body["data"]["groups"]
+        .as_array()
+        .expect("groups array")
+        .iter()
+        .find(|group| group["normalized_name"] == Value::String("Quality Show (2024)".into()))
+        .expect("quality group");
+
+    assert_eq!(group["episode_count"], Value::from(2));
+    assert_eq!(group["conflict_count"], Value::from(0));
+
+    let episodes = group["episodes"].as_array().expect("episodes array");
+    let first_slot = episodes
+        .iter()
+        .find(|slot| {
+            slot["season_number"] == Value::from(1) && slot["episode_number"] == Value::from(1)
+        })
+        .expect("first slot");
+    assert_eq!(
+        first_slot["auto_selected_source_directory"],
+        Value::String("Quality Show - 2024 [tvdbid-2]".into())
+    );
+    assert_eq!(first_slot["conflict"], Value::Bool(false));
+    assert_eq!(
+        first_slot["candidates"]
+            .as_array()
+            .expect("candidates array")
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn post_scan_marks_overlapping_non_equivalent_tv_episodes_as_conflicts() {
+    let temp = tempdir().expect("temp dir");
+    let base_path = temp.path();
+    let app = test_app_with_media_roots(
+        60,
+        Arc::new(InMemoryScanService::new()) as Arc<dyn ScanService>,
+        base_path.to_path_buf(),
+        base_path.to_path_buf(),
+    );
+
+    let source_a = base_path.join("Conflict Show 2024 - [tmdbid-1]");
+    let source_b = base_path.join("Conflict Show - 2024 [tvdbid-2]");
+    std::fs::create_dir_all(source_a.join("Season 01")).expect("create source a season");
+    std::fs::create_dir_all(source_b.join("Season 1")).expect("create source b season");
+    std::fs::write(
+        source_a
+            .join("Season 01")
+            .join("Conflict Show - S01E01 - Pilot [WEBDL-1080p][h264]-AAA.mkv"),
+        vec![0_u8; 100],
+    )
+    .expect("write source a episode");
+    std::fs::write(
+        source_b
+            .join("Season 1")
+            .join("Conflict Show - S01E01 - Pilot [WEBDL-2160p][h265]-BBB.mkv"),
+        vec![0_u8; 240],
+    )
+    .expect("write source b conflicting episode");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/scan")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"media_type":"tv"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = parse_json(response).await;
+
+    assert_eq!(body["data"]["summary"]["total_episodes"], Value::from(1));
+    assert_eq!(body["data"]["summary"]["conflicts"], Value::from(1));
+
+    let group = body["data"]["groups"]
+        .as_array()
+        .expect("groups array")
+        .iter()
+        .find(|group| group["normalized_name"] == Value::String("Conflict Show (2024)".into()))
+        .expect("conflict group");
+
+    assert_eq!(group["episode_count"], Value::from(1));
+    assert_eq!(group["conflict_count"], Value::from(1));
+
+    let slot = group["episodes"]
+        .as_array()
+        .expect("episodes array")
+        .first()
+        .expect("first slot");
+    assert_eq!(slot["auto_selected_source_directory"], Value::Null);
+    assert_eq!(slot["conflict"], Value::Bool(true));
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use supafast_jellyfin::config::AppConfig;
-use supafast_jellyfin::db::{assert_scan_schema_ready, connect_pg_pool};
+use supafast_jellyfin::db::{assert_scan_schema_ready, connect_pg_pool, run_migrations};
 use supafast_jellyfin::http::build_app;
 use supafast_jellyfin::repositories::scan_repo::{
     InMemoryScanRepository, PgScanRepository, ScanRepository,
@@ -18,17 +18,22 @@ async fn main() -> anyhow::Result<()> {
     config.validate_startup_paths()?;
     tracing::info!("startup path validation passed");
 
-    let scan_repository: Arc<dyn ScanRepository> = match config.database_url.as_deref() {
-        Some(database_url) => {
-            let pool = connect_pg_pool(database_url).await?;
-            assert_scan_schema_ready(&pool).await?;
-            Arc::new(PgScanRepository::new(pool))
-        }
-        None => Arc::new(InMemoryScanRepository::new()),
-    };
-    let scan_service: Arc<dyn ScanService> =
-        Arc::new(InMemoryScanService::with_repository(scan_repository));
-    let state = AppState::new(config.clone(), scan_service);
+    let (scan_repository, pg_pool): (Arc<dyn ScanRepository>, Option<sqlx::PgPool>) =
+        match config.database_url.as_deref() {
+            Some(database_url) => {
+                let pool = connect_pg_pool(database_url).await?;
+                run_migrations(&pool).await?;
+                assert_scan_schema_ready(&pool).await?;
+                let repo = Arc::new(PgScanRepository::new(pool.clone()));
+                (repo, Some(pool))
+            }
+            None => (Arc::new(InMemoryScanRepository::new()), None),
+        };
+    let scan_service: Arc<dyn ScanService> = Arc::new(
+        InMemoryScanService::with_repository(scan_repository)
+            .with_follow_symlinks(config.follow_symlinks),
+    );
+    let state = AppState::new(config.clone(), scan_service, pg_pool);
 
     let app = build_app(state);
 

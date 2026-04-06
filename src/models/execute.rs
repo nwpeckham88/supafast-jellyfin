@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::models::audit::AuditEntry;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginationMeta {
     pub page: usize,
     pub page_size: usize,
@@ -19,7 +19,16 @@ pub struct ExecuteNormalizeRequest {
     pub base_path: String,
     pub name_overrides: Vec<NameOverride>,
     pub conflict_resolutions: Vec<ConflictResolution>,
+    #[serde(default)]
+    pub movie_rename_mode: Option<MovieRenameMode>,
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MovieRenameMode {
+    Clean,
+    ProviderIds,
 }
 
 #[derive(Debug, Clone, Deserialize)]

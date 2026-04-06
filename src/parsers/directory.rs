@@ -1,3 +1,48 @@
+pub fn extract_metadata_tags(input: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '[' {
+            continue;
+        }
+
+        let mut bracket_content = String::new();
+        let mut found_close = false;
+        while let Some(next) = chars.next() {
+            if next == ']' {
+                found_close = true;
+                break;
+            }
+            bracket_content.push(next);
+        }
+
+        if !found_close {
+            break;
+        }
+
+        if let Some(tag) = canonicalize_metadata_tag(&bracket_content) {
+            tags.push(tag);
+        }
+    }
+
+    tags
+}
+
+pub fn append_metadata_tags(base_name: &str, tags: &[String]) -> String {
+    if tags.is_empty() {
+        return base_name.to_string();
+    }
+
+    let suffix = tags
+        .iter()
+        .map(|tag| format!("[{tag}]"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    format!("{base_name} {suffix}")
+}
+
 pub fn normalize_directory_name(input: &str) -> String {
     let without_brackets = strip_bracket_groups(input);
     let normalized_punctuation = normalize_punctuation(&without_brackets);
@@ -125,7 +170,11 @@ fn trim_trailing_separators(input: &str) -> String {
 }
 
 fn is_year(value: &str) -> bool {
-    value.len() == 4 && value.chars().all(|c| c.is_ascii_digit())
+    if value.len() != 4 || !value.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let year: u32 = value.parse().unwrap_or(0);
+    (1880..=2035).contains(&year)
 }
 
 fn is_metadata_tag(value: &str) -> bool {
@@ -135,6 +184,27 @@ fn is_metadata_tag(value: &str) -> bool {
         || lower.starts_with("imdbid-")
         || lower.starts_with("imdb-tt")
         || lower.starts_with("imdb-")
+}
+
+fn canonicalize_metadata_tag(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("tmdbid-") && lower.len() > "tmdbid-".len() {
+        return Some(lower);
+    }
+
+    if lower.starts_with("tvdbid-") && lower.len() > "tvdbid-".len() {
+        return Some(lower);
+    }
+
+    if lower.starts_with("imdbid-tt") && lower.len() > "imdbid-tt".len() {
+        return Some(lower);
+    }
+
+    if lower.starts_with("imdb-tt") && lower.len() > "imdb-tt".len() {
+        return Some(format!("imdbid-{}", &lower["imdb-".len()..]));
+    }
+
+    None
 }
 
 fn collapse_whitespace(input: &str) -> String {

@@ -1678,6 +1678,7 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",

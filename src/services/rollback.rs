@@ -1,9 +1,10 @@
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
-    hash::{Hash, Hasher},
+    collections::HashMap,
     path::Path,
     sync::{Arc, RwLock},
 };
+
+use sha2::{Digest, Sha256};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -12,15 +13,15 @@ use uuid::Uuid;
 use crate::{
     models::{
         audit::AuditOpStatus,
-        execute::NormalizeJobStatus,
+        execute::{NormalizeJobStatus, PaginationMeta},
         rollback::{
             RollbackExecuteRequest, RollbackExecuteResponse, RollbackJobStatus,
-            RollbackOperationPreview, RollbackPaginationMeta, RollbackPreviewRequest,
-            RollbackPreviewResponse, RollbackSessionSummary, RollbackSessionsResponse,
+            RollbackOperationPreview, RollbackPreviewRequest, RollbackPreviewResponse,
+            RollbackSessionSummary, RollbackSessionsResponse,
         },
     },
     repositories::execute_repo::{ExecuteRepository, ExecuteRepositoryError, JobRecord},
-    safety::base_path_lock::BasePathLockManager,
+    safety::{base_path_lock::BasePathLockManager, fs_ops},
 };
 
 #[derive(Debug, Error)]
@@ -171,7 +172,7 @@ impl RollbackService for InMemoryRollbackService {
 
         Ok(RollbackSessionsResponse {
             sessions: paged,
-            pagination: RollbackPaginationMeta {
+            pagination: PaginationMeta {
                 page,
                 page_size,
                 total,
@@ -352,7 +353,7 @@ async fn run_rollback_job(
         let rename_result = tokio::task::spawn_blocking({
             let source = source.to_path_buf();
             let target = target.to_path_buf();
-            move || std::fs::rename(source, target)
+            move || fs_ops::rename_with_exdev_fallback(&source, &target)
         })
         .await;
 
@@ -365,7 +366,10 @@ async fn run_rollback_job(
             }
             Ok(Err(_)) | Err(_) => {
                 for (previous_source, previous_target) in applied_operations.iter().rev() {
-                    let _ = std::fs::rename(previous_target, previous_source);
+                    let _ = fs_ops::rename_with_exdev_fallback(
+                        Path::new(previous_target),
+                        Path::new(previous_source),
+                    );
                 }
                 job_record.status = RollbackJobStatus::Failed;
                 update_rollback_job(&rollback_state, job_record.clone())?;
@@ -581,9 +585,8 @@ fn compute_request_fingerprint(
     let payload = serde_json::to_string(&(request.session_id, request.dry_run))
         .map_err(|error| RollbackServiceError::Internal(error.to_string()))?;
 
-    let mut hasher = DefaultHasher::new();
-    payload.hash(&mut hasher);
-    Ok(format!("{:016x}", hasher.finish()))
+    let hash = Sha256::digest(payload.as_bytes());
+    Ok(format!("{:064x}", hash))
 }
 
 fn rollback_key(session_id: Uuid, idempotency_key: &str) -> String {

@@ -1,10 +1,11 @@
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
-    hash::{Hash, Hasher},
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use sha2::{Digest, Sha256};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -14,21 +15,22 @@ use crate::{
     models::{
         audit::{AuditEntry, AuditOpStatus},
         execute::{
-            ExecuteNormalizeRequest, ExecuteNormalizeResponse, NormalizeJobEntriesResponse,
-            NormalizeJobListResponse, NormalizeJobResponse, NormalizeJobStatus,
-            NormalizeJobSummary, PaginationMeta,
+            ExecuteNormalizeRequest, ExecuteNormalizeResponse, MovieRenameMode,
+            NormalizeJobEntriesResponse, NormalizeJobListResponse, NormalizeJobResponse,
+            NormalizeJobStatus, NormalizeJobSummary, PaginationMeta,
         },
         plan::{NormalizePlan, PlanOpType, PlanOperation},
-        scan::ScanResult,
+        scan::{ScanGroup, ScanResult},
     },
     repositories::execute_repo::{
         ClaimJobResult, ExecuteRepository, ExecuteRepositoryError, JobRecord,
     },
     parsers::{
+        directory::{append_metadata_tags, extract_metadata_tags, normalize_directory_name},
         episode::normalize_episode_filename_with_nfo,
         season::normalize_season_directory_name,
     },
-    safety::{base_path_lock::BasePathLockManager, path_guard},
+    safety::{base_path_lock::BasePathLockManager, fs_ops, path_guard},
     services::scan::ScanService,
 };
 
@@ -76,6 +78,7 @@ pub struct InMemoryExecuteService {
     scan_service: Arc<dyn ScanService>,
     repository: Arc<dyn ExecuteRepository>,
     base_path_lock: Arc<BasePathLockManager>,
+    default_movie_rename_mode: MovieRenameMode,
 }
 
 const DRY_RUN_PROGRESS_BATCH_SIZE: usize = 100;
@@ -85,11 +88,13 @@ impl InMemoryExecuteService {
         scan_service: Arc<dyn ScanService>,
         repository: Arc<dyn ExecuteRepository>,
         base_path_lock: Arc<BasePathLockManager>,
+        default_movie_rename_mode: MovieRenameMode,
     ) -> Self {
         Self {
             scan_service,
             repository,
             base_path_lock,
+            default_movie_rename_mode,
         }
     }
 }
@@ -98,8 +103,12 @@ impl InMemoryExecuteService {
 impl ExecuteService for InMemoryExecuteService {
     async fn execute(
         &self,
-        request: ExecuteNormalizeRequest,
+        mut request: ExecuteNormalizeRequest,
     ) -> Result<ExecuteNormalizeResponse, ExecuteServiceError> {
+        if request.movie_rename_mode.is_none() {
+            request.movie_rename_mode = Some(self.default_movie_rename_mode);
+        }
+
         let request_fingerprint = compute_request_fingerprint(&request)?;
 
         if request.idempotency_key.trim().is_empty() {
@@ -382,19 +391,27 @@ async fn run_job(
             return;
         }
 
-        let source_for_rename = source_path.clone();
-        let target_for_rename = target_path.clone();
-        let rename_outcome = tokio::task::spawn_blocking(move || {
-            std::fs::rename(&source_for_rename, &target_for_rename)
+        let op_type = job.entries[index].op_type.clone();
+        let source_for_op = source_path.clone();
+        let target_for_op = target_path.clone();
+        let fs_outcome = tokio::task::spawn_blocking(move || {
+            if op_type == "delete_dir" {
+                std::fs::remove_dir(Path::new(&source_for_op))
+            } else {
+                fs_ops::rename_with_exdev_fallback(
+                    Path::new(&source_for_op),
+                    Path::new(&target_for_op),
+                )
+            }
         })
         .await;
-        match rename_outcome {
+        match fs_outcome {
             Ok(Ok(())) => {
                 job.entries[index].status = AuditOpStatus::Succeeded;
                 let _ = repository.update_job(job.clone()).await;
             }
             Ok(Err(_)) | Err(_) => {
-                tracing::warn!("filesystem rename failed");
+                tracing::warn!(op_type = %job.entries[index].op_type, "filesystem operation failed");
                 job.entries[index].status = AuditOpStatus::Failed;
                 job.entries[index].error_message = Some("filesystem operation failed".to_string());
                 job.status = NormalizeJobStatus::Failed;
@@ -445,10 +462,22 @@ fn build_plan(
         })
         .collect();
 
+    let movie_rename_mode = request.movie_rename_mode.unwrap_or(MovieRenameMode::Clean);
     let mut operation_candidates = Vec::new();
 
     for group in &scan.groups {
-        let selected = conflict_resolutions.get(group.normalized_name.as_str()).copied();
+        let selected = conflict_resolutions
+            .get(group.normalized_name.as_str())
+            .copied();
+        let selected_target_directory = selected.map(|selected_source| {
+            build_target_directory_name_for_source(
+                selected_source,
+                group,
+                &overrides,
+                &request.media_type,
+                movie_rename_mode,
+            )
+        });
         if let Some(selected) = selected {
             if !group
                 .source_directories
@@ -459,6 +488,8 @@ fn build_plan(
                     "conflict resolution selected_source_directory is not in scan group",
                 ));
             }
+        } else if group.source_directories.len() > 1 {
+            return Err(preflight(missing_conflict_resolution_message(group)));
         }
 
         for source_directory in &group.source_directories {
@@ -481,6 +512,7 @@ fn build_plan(
                             &source_path,
                             &merge_target_path,
                             &request.media_type,
+                            selected_target_directory.as_deref(),
                         )
                         .map_err(|_| preflight("failed to build merge operations from filesystem"))?,
                     );
@@ -488,17 +520,16 @@ fn build_plan(
                 }
             }
 
-            let target_directory = overrides
-                .get(source_directory.as_str())
-                .copied()
-                .unwrap_or(group.normalized_name.as_str());
-
-            if source_directory == target_directory {
-                continue;
-            }
+            let target_directory = build_target_directory_name_for_source(
+                source_directory,
+                group,
+                &overrides,
+                &request.media_type,
+                movie_rename_mode,
+            );
 
             let source_relative = parse_relative_component(source_directory)?;
-            let target_relative = parse_relative_component(target_directory)?;
+            let target_relative = parse_relative_component(&target_directory)?;
             let source_path = path_guard::resolve_under_base(&canonical_base, &source_relative)
                 .map_err(|_| preflight("source path resolved outside base path"))?;
             let target_path = path_guard::resolve_under_base(&canonical_base, &target_relative)
@@ -509,11 +540,20 @@ fn build_plan(
                     build_tv_nested_operations(&source_path)
                         .map_err(|_| preflight("failed to inspect nested TV paths"))?,
                 );
+            } else if request.media_type == "movie" {
+                operation_candidates.extend(
+                    build_movie_file_rename_operations(&source_path, &target_directory)
+                        .map_err(|_| preflight("failed to inspect movie files"))?,
+                );
+            }
+
+            if source_directory == &target_directory {
+                continue;
             }
 
             operation_candidates.push((
                 source_directory.clone(),
-                target_directory.to_string(),
+                target_directory,
                 PlanOpType::RenameDir,
                 source_path,
                 target_path,
@@ -573,6 +613,7 @@ fn build_group_merge_operations(
     source_group_path: &Path,
     target_group_path: &Path,
     media_type: &str,
+    movie_target_directory_name: Option<&str>,
 ) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
     let mut operations = Vec::new();
 
@@ -592,6 +633,10 @@ fn build_group_merge_operations(
             && is_episode_container_dir(source_group_path)
         {
             normalize_episode_filename_with_nfo(source_group_path, &source_name)
+        } else if media_type == "movie" && source_path.is_file() {
+            movie_target_directory_name
+                .map(|name| normalize_movie_related_filename(&source_name, name))
+                .unwrap_or_else(|| source_name.clone())
         } else {
             source_name.clone()
         };
@@ -601,36 +646,52 @@ fn build_group_merge_operations(
             continue;
         }
 
-        let op_type = if source_path.is_dir() {
-            PlanOpType::RenameDir
+        if source_path.is_dir() {
+            if target_path.exists() {
+                // Both source and target dirs exist — recurse to merge contents
+                operations.extend(build_group_merge_operations(
+                    &source_path,
+                    &target_path,
+                    media_type,
+                    movie_target_directory_name,
+                )?);
+            } else {
+                // Move entire directory to target (it's a merge move, not a simple rename)
+                if media_type == "tv" && is_episode_container_dir(&source_path) {
+                    operations.extend(build_episode_file_rename_ops(&source_path)?);
+                }
+                operations.push((
+                    source_name,
+                    target_name,
+                    PlanOpType::RenameDir,
+                    source_path,
+                    target_path,
+                ));
+            }
         } else {
-            PlanOpType::RenameFile
-        };
-
-        if op_type == PlanOpType::RenameDir && target_path.exists() {
-            operations.extend(build_group_merge_operations(
-                &source_path,
-                &target_path,
-                media_type,
-            )?);
-            continue;
+            // File move during merge uses MoveFile op type
+            operations.push((
+                source_name,
+                target_name,
+                PlanOpType::MoveFile,
+                source_path,
+                target_path,
+            ));
         }
-
-        if op_type == PlanOpType::RenameDir
-            && media_type == "tv"
-            && is_episode_container_dir(&source_path)
-        {
-            operations.extend(build_episode_file_rename_ops(&source_path)?);
-        }
-
-        operations.push((
-            source_name,
-            target_name,
-            op_type,
-            source_path,
-            target_path,
-        ));
     }
+
+    // Add delete_dir for the source directory after its contents are moved
+    let source_dir_name = source_group_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    operations.push((
+        source_dir_name.clone(),
+        source_dir_name,
+        PlanOpType::DeleteDir,
+        source_group_path.to_path_buf(),
+        source_group_path.to_path_buf(), // target is same as source for delete
+    ));
 
     Ok(operations)
 }
@@ -715,8 +776,9 @@ fn build_tv_episode_file_operations(
 
 fn op_type_rank(op_type: PlanOpType) -> u8 {
     match op_type {
-        PlanOpType::RenameFile => 0,
+        PlanOpType::RenameFile | PlanOpType::MoveFile => 0,
         PlanOpType::RenameDir => 1,
+        PlanOpType::DeleteDir => 2,
     }
 }
 
@@ -753,6 +815,12 @@ fn preflight_validate(plan: &NormalizePlan, dry_run: bool) -> Result<(), Execute
     for operation in &plan.operations {
         let source = Path::new(&operation.source_path);
         let target = Path::new(&operation.target_path);
+
+        // DeleteDir only needs source validation — target is same as source
+        if operation.op_type == PlanOpType::DeleteDir {
+            ensure_absolute_under_base(&canonical_base, source, false)?;
+            continue;
+        }
 
         revalidate_operation_paths(&canonical_base, source, target)?;
 
@@ -834,9 +902,8 @@ fn compute_plan_hash(
     let canonical = serde_json::to_string(&(scan_id, base_path, media_type, operations))
         .map_err(|error| ExecuteServiceError::Internal(error.to_string()))?;
 
-    let mut hasher = DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    Ok(format!("{:016x}", hasher.finish()))
+    let hash = Sha256::digest(canonical.as_bytes());
+    Ok(format!("{:064x}", hash))
 }
 
 fn compute_request_fingerprint(
@@ -850,12 +917,13 @@ fn compute_request_fingerprint(
         .map(|override_| {
             (
                 override_.source_directory.clone(),
-                override_.normalized_name.clone(),
+                normalize_requested_directory_name(&override_.normalized_name),
             )
         })
         .collect::<Vec<_>>();
     overrides.sort();
 
+    let movie_rename_mode = request.movie_rename_mode.unwrap_or(MovieRenameMode::Clean);
     let mut resolutions = request
         .conflict_resolutions
         .iter()
@@ -872,15 +940,15 @@ fn compute_request_fingerprint(
         request.scan_id,
         request.media_type.as_str(),
         canonical_base_path,
+        movie_rename_mode,
         request.dry_run,
         overrides,
         resolutions,
     ))
     .map_err(|error| ExecuteServiceError::Internal(error.to_string()))?;
 
-    let mut hasher = DefaultHasher::new();
-    payload.hash(&mut hasher);
-    Ok(format!("{:016x}", hasher.finish()))
+    let hash = Sha256::digest(payload.as_bytes());
+    Ok(format!("{:064x}", hash))
 }
 
 fn map_repo_error(error: ExecuteRepositoryError) -> ExecuteServiceError {
@@ -902,12 +970,74 @@ fn map_plan_op_type(op_type: PlanOpType) -> &'static str {
     match op_type {
         PlanOpType::RenameDir => "rename_dir",
         PlanOpType::RenameFile => "rename_file",
+        PlanOpType::MoveFile => "move_file",
+        PlanOpType::DeleteDir => "delete_dir",
     }
 }
 
 fn validate_plan_for_media_type(plan: &NormalizePlan) -> Result<(), ExecuteServiceError> {
-    let _ = plan;
+    if plan.media_type == "movie" {
+        for op in &plan.operations {
+            if op.op_type != PlanOpType::RenameFile {
+                continue;
+            }
+
+            let source_parent = Path::new(&op.source_path).parent();
+            let target_parent = Path::new(&op.target_path).parent();
+            if source_parent != target_parent {
+                return Err(preflight(
+                    "movie plan contains file rename operations that leave the source directory",
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+fn missing_conflict_resolution_message(group: &ScanGroup) -> String {
+    match preferred_source_directory_for_group(group) {
+        Some(preferred_source) => format!(
+            "duplicate group '{}' requires conflict resolution; recommended selected_source_directory is '{}'",
+            group.normalized_name, preferred_source
+        ),
+        None => format!(
+            "duplicate group '{}' requires conflict resolution",
+            group.normalized_name
+        ),
+    }
+}
+
+fn preferred_source_directory_for_group(group: &ScanGroup) -> Option<&str> {
+    if group.episodes.is_empty() {
+        return None;
+    }
+
+    let mut preferred_source: Option<&str> = None;
+    let mut overlapping_slot_count = 0;
+
+    for slot in &group.episodes {
+        if slot.candidates.len() <= 1 {
+            continue;
+        }
+
+        overlapping_slot_count += 1;
+        if slot.conflict {
+            return None;
+        }
+
+        let slot_preferred = slot.auto_selected_source_directory.as_deref()?;
+        match preferred_source {
+            Some(existing) if existing != slot_preferred => return None,
+            Some(_) => {}
+            None => preferred_source = Some(slot_preferred),
+        }
+    }
+
+    if overlapping_slot_count == 0 {
+        return None;
+    }
+
+    preferred_source
 }
 
 fn append_trickplay_companion_operations(operations: Vec<PlanOperation>) -> Vec<PlanOperation> {
@@ -993,6 +1123,207 @@ fn build_episode_file_rename_ops(
     }
 
     Ok(operations)
+}
+
+fn normalize_requested_directory_name(value: &str) -> String {
+    let normalized = normalize_directory_name(value);
+    if normalized.is_empty() {
+        value.trim().to_string()
+    } else {
+        normalized
+    }
+}
+
+fn build_target_directory_name_for_source(
+    source_directory: &str,
+    group: &ScanGroup,
+    overrides: &HashMap<&str, &str>,
+    media_type: &str,
+    movie_rename_mode: MovieRenameMode,
+) -> String {
+    let requested_base_name = overrides
+        .get(source_directory)
+        .copied()
+        .unwrap_or(group.normalized_name.as_str());
+
+    if media_type != "movie" {
+        return normalize_requested_directory_name(requested_base_name);
+    }
+
+    build_movie_directory_name(requested_base_name, group, movie_rename_mode)
+}
+
+fn build_movie_directory_name(
+    requested_base_name: &str,
+    group: &ScanGroup,
+    movie_rename_mode: MovieRenameMode,
+) -> String {
+    let base_name = normalize_requested_directory_name(requested_base_name);
+    if movie_rename_mode == MovieRenameMode::Clean {
+        return base_name;
+    }
+
+    let metadata_tags = collect_group_metadata_tags(group);
+    append_metadata_tags(&base_name, &metadata_tags)
+}
+
+fn collect_group_metadata_tags(group: &ScanGroup) -> Vec<String> {
+    let mut tmdb = Vec::new();
+    let mut imdb = Vec::new();
+    let mut tvdb = Vec::new();
+    let mut other = Vec::new();
+
+    for source_directory in &group.source_directories {
+        for tag in extract_metadata_tags(source_directory) {
+            if tmdb.contains(&tag) || imdb.contains(&tag) || tvdb.contains(&tag) || other.contains(&tag)
+            {
+                continue;
+            }
+
+            if tag.starts_with("tmdbid-") {
+                tmdb.push(tag);
+            } else if tag.starts_with("imdbid-") {
+                imdb.push(tag);
+            } else if tag.starts_with("tvdbid-") {
+                tvdb.push(tag);
+            } else {
+                other.push(tag);
+            }
+        }
+    }
+
+    tmdb.extend(imdb);
+    tmdb.extend(tvdb);
+    tmdb.extend(other);
+    tmdb
+}
+
+fn build_movie_file_rename_operations(
+    movie_dir: &Path,
+    target_movie_name: &str,
+) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
+    let mut operations = Vec::new();
+    let comparable_movie_name = normalize_directory_name(target_movie_name);
+
+    for entry in std::fs::read_dir(movie_dir)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        if !source_path.is_file() {
+            continue;
+        }
+
+        let source_name = entry.file_name().to_string_lossy().to_string();
+        let target_name = normalize_movie_related_filename(&source_name, target_movie_name);
+        if target_name == source_name {
+            continue;
+        }
+
+        let normalized_stem = normalize_movie_stem(&source_name);
+        let is_movie_nfo_target = target_name.eq_ignore_ascii_case("movie.nfo");
+        if !is_movie_nfo_target && normalized_stem.as_deref() != Some(comparable_movie_name.as_str()) {
+            continue;
+        }
+
+        operations.push((
+            source_name.clone(),
+            target_name.clone(),
+            PlanOpType::RenameFile,
+            source_path,
+            movie_dir.join(target_name),
+        ));
+    }
+
+    Ok(operations)
+}
+
+fn normalize_movie_related_filename(filename: &str, target_movie_name: &str) -> String {
+    if filename.eq_ignore_ascii_case("movie.nfo") {
+        return "movie.nfo".to_string();
+    }
+
+    if is_protected_movie_filename(filename) {
+        return filename.to_string();
+    }
+
+    let Some(normalized_stem) = normalize_movie_stem(filename) else {
+        return filename.to_string();
+    };
+    let comparable_movie_name = normalize_directory_name(target_movie_name);
+    if normalized_stem != comparable_movie_name {
+        return filename.to_string();
+    }
+
+    let (_, suffix) = split_movie_stem_and_suffix(filename);
+    if suffix.eq_ignore_ascii_case(".nfo") {
+        return "movie.nfo".to_string();
+    }
+
+    format!("{target_movie_name}{suffix}")
+}
+
+fn normalize_movie_stem(filename: &str) -> Option<String> {
+    let (stem, _) = split_movie_stem_and_suffix(filename);
+    let normalized = normalize_directory_name(&stem.replace('.', " "));
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn is_protected_movie_filename(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "poster.jpg"
+            | "fanart.jpg"
+            | "banner.jpg"
+            | "clearlogo.png"
+            | "landscape.jpg"
+            | "folder.jpg"
+            | "cover.jpg"
+            | "cover.png"
+    ) {
+        return true;
+    }
+
+    lower.starts_with("backdrop") && lower.ends_with(".jpg")
+}
+
+fn split_movie_stem_and_suffix(input: &str) -> (&str, &str) {
+    let lower = input.to_ascii_lowercase();
+
+    if lower.ends_with(".sharky.json") {
+        let split = input.len() - ".sharky.json".len();
+        return (&input[..split], &input[split..]);
+    }
+
+    const LANGUAGE_EXTENSIONS: &[&str] = &[".srt", ".ass", ".ssa", ".sub", ".vtt", ".sup"];
+    for extension in LANGUAGE_EXTENSIONS {
+        if !lower.ends_with(extension) {
+            continue;
+        }
+
+        if let Some(last_dot) = input.rfind('.') {
+            let before_extension = &input[..last_dot];
+            if let Some(lang_dot) = before_extension.rfind('.') {
+                let lang = &before_extension[lang_dot + 1..];
+                if (2..=8).contains(&lang.len())
+                    && lang
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                {
+                    return (&input[..lang_dot], &input[lang_dot..]);
+                }
+            }
+        }
+    }
+
+    if let Some(dot) = input.rfind('.') {
+        return (&input[..dot], &input[dot..]);
+    }
+
+    (input, "")
 }
 
 fn summarize_job(job: &JobRecord) -> NormalizeJobSummary {

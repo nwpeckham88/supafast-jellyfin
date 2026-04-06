@@ -6,6 +6,8 @@ use uuid::Uuid;
 pub enum PlanOpType {
     RenameDir,
     RenameFile,
+    MoveFile,
+    DeleteDir,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -56,6 +56,12 @@ pub fn normalize_episode_filename_with_nfo(season_dir: &Path, input: &str) -> St
     format!("{:02}x{:02} - {}{}", metadata.season, metadata.episode, title, suffix)
 }
 
+pub fn parse_episode_identity(input: &str) -> Option<(u32, u32)> {
+    let (stem, _) = split_stem_and_suffix(input);
+    let stem = stem.strip_suffix("-thumb").unwrap_or(stem);
+    extract_episode_identity(stem).map(|(season, episode, _)| (season, episode))
+}
+
 pub fn is_protected_filename(filename: &str) -> bool {
     let lower = filename.to_ascii_lowercase();
     if matches!(
@@ -208,7 +214,11 @@ fn trim_trailing_separators(input: &str) -> String {
 }
 
 fn is_year(value: &str) -> bool {
-    value.len() == 4 && value.chars().all(|c| c.is_ascii_digit())
+    if value.len() != 4 || !value.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let year: u32 = value.parse().unwrap_or(0);
+    (1880..=2035).contains(&year)
 }
 
 fn collapse_whitespace(input: &str) -> String {

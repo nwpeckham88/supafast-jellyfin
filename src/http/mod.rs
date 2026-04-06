@@ -1,7 +1,10 @@
-use axum::{http::StatusCode, middleware::from_fn, response::IntoResponse, routing::get, Router};
+use axum::{http::StatusCode, middleware::from_fn, response::IntoResponse, routing::get, Json, Router};
 
 use crate::{
-    http::middleware::correlation_id::{correlation_id_middleware, CorrelationId},
+    http::{
+        middleware::correlation_id::{correlation_id_middleware, CorrelationId},
+        response::ApiResponse,
+    },
     state::AppState,
 };
 
@@ -21,5 +24,5 @@ pub fn build_app(state: AppState) -> Router {
 
 async fn health(correlation_id: CorrelationId) -> impl IntoResponse {
     tracing::info!(correlation_id = %correlation_id, "health endpoint called");
-    (StatusCode::OK, "ok")
+    (StatusCode::OK, Json(ApiResponse::success("ok")))
 }

@@ -385,6 +385,111 @@ Coverage target: >=80% overall, parser/executor layers near 100%.
 
 ---
 
+## Gap Analysis (2026-04-06)
+
+Assessment of current implementation against this plan. Build compiles cleanly; 94 tests pass, 0 fail, 1 ignored (requires live Postgres).
+
+### What's Working Well
+
+| Area | Notes |
+|------|-------|
+| Directory parser | Handles `[imdb-X]`, `[tmdbid-X]`, `[tvdbid-X]`, unicode colons, underscores, trailing separators, year extraction |
+| Episode parser | Protected files, compound extensions, `-thumb` suffix, release group stripping, NFO enrichment |
+| Quality parser | Extracts resolution, codec, source, group per spec |
+| Season parser | Normalizes `S01`, `season 1`, `Season_1` → `Season 1` |
+| Path safety | Canonicalization, boundary enforcement, parent-dir traversal rejection, symlink checking |
+| Base path locks | Per-base-path mutual exclusion for concurrent jobs |
+| API envelope | `{ success, data, error, meta }` per spec |
+| Config/startup | All env vars from spec, startup path validation with write probes, credential masking |
+| Idempotency | Request fingerprinting, claim-or-replay pattern for execute and rollback |
+| Correlation IDs | Middleware injects/propagates correlation IDs |
+| Rollback | Reverse-chronological order, blocked-reason classification, compensating undo on failure |
+| Trickplay handling | Companion `.trickplay` dirs detected and renamed alongside media files |
+
+### Issues
+
+#### CRITICAL
+
+1. **No `move_file` or `delete_dir` operation types in executor.** `PlanOpType` only has `RenameDir` and `RenameFile`. Merge code in `execute.rs` uses `RenameFile` for file moves during merge, but there is no `delete_dir` to clean up empty source directories after merge. Empty source show directories (e.g., `Ted Lasso - [tmdbid-97546]`) will be left behind.
+
+2. **Execute repository is in-memory only.** `ExecuteRepository` has no Postgres implementation (unlike `ScanRepository`). All job state, audit entries, and idempotency records are lost on restart. Rollback is impossible after server restart. Idempotency guarantees are ephemeral. The schema above specifies `audit_sessions` and `audit_entries` tables for persistent state.
+
+3. **EXDEV cross-filesystem moves not handled.** `execute.rs` uses bare `std::fs::rename()`. This plan specifies "Handle EXDEV via copy + fsync + atomic replace + delete, with audit entries." If NAS storage is on a different mount, renames fail with EXDEV.
+
+#### HIGH
+
+4. **Scan service doesn't count episodes or detect conflicts.** `scan.rs`: `total_episodes` is always 0, `conflicts` is always 0. Scanner only reads top-level directories — doesn't descend into season folders. Preview UI shows incomplete summary data.
+
+5. **ScanGroup lacks episode-level detail.** `ScanGroup` only has `normalized_name` and `source_directories`. This plan describes a hierarchical response with episode lists, quality info, and conflict markers per episode slot. Frontend can't show per-episode detail or let users resolve per-episode conflicts.
+
+6. **Quality parser extracted but never used in merge decisions.** `extract_quality_info()` exists but is never called by scanner or executor. Auto-resolution for materially equivalent files (same resolution/codec/source, size within 5%) is not implemented. Merge conflict resolution is entirely manual.
+
+7. **Movie mode is incomplete.** Scan endpoint accepts `"movie"` and directory parser works for movies, but `build_plan()` only calls `build_tv_nested_operations()`. Movie directories should get dir renames only (no episode file processing), but `build_group_merge_operations` still tries episode filename normalization for movie files.
+
+8. **`is_year()` is too permissive.** Accepts any 4-digit number (1000–9999). Titles containing 4-digit numbers that aren't years could be misinterpreted. Should constrain to a reasonable range (e.g., 1880–2035).
+
+#### MEDIUM
+
+9. **Rollback state is in-memory only.** `RollbackState` in `rollback.rs` uses `RwLock` and is lost on restart. Separate from issue #2 but same root cause.
+
+10. **`validate_plan_for_media_type()` is a no-op.** `execute.rs`: function is stubbed out. No validation that movie plans don't contain episode file renames or that TV plans have season structure.
+
+11. **No pagination on scan results.** `ScanResult` returns all groups in one response. For large libraries (1,000+ shows), this is a very large payload.
+
+12. **`DefaultHasher` for plan/request fingerprints.** `execute.rs`: `DefaultHasher` is not guaranteed stable across Rust versions. If the binary is upgraded, idempotency keys silently change meaning. Should use a stable hash (SHA-256, xxhash, etc.).
+
+13. **No startup reconciliation.** If the server crashes mid-execute, in-memory state is lost and the filesystem is left in a partial state with no way to resume or detect the incomplete job.
+
+14. **`follow_symlinks` config declared but never read.** `config.rs` defines it, but no code checks `config.follow_symlinks`. Scanner always follows the default `is_dir()` behavior.
+
+15. **No rate limiting on endpoints.** Security checklist in this plan requires rate limiting.
+
+#### LOW
+
+16. **Duplicate `PaginationMeta` structs.** `execute.rs` and `rollback.rs` define separate identical pagination meta structs.
+
+17. **Health endpoint returns plain text.** Other endpoints use `ApiResponse` envelope; health returns bare `"ok"`.
+
+18. **`base_path` exposed in `ScanResult`.** Scan result serializes `base_path`, exposing server filesystem paths to the client.
+
+### Phase Completion Assessment
+
+| Phase | Status | Completeness | Key Gaps |
+|-------|--------|-------------|----------|
+| Phase 0 - ADRs + Safety | Done | ~80% | Missing: ADR docs, EXDEV handling |
+| Phase 1 - Parsers + Scaffolding | Done | ~95% | Quality parser unused |
+| Phase 2 - DB + Scanner + Preview | Partial | ~60% | Scan repo has Postgres. Scanner only does directory grouping, no episode enumeration |
+| Phase 3 - Execute + Audit | Partial | ~70% | Execute works in-memory. Missing: persistent audit, EXDEV, `delete_dir` ops, episode-level merge |
+| Phase 4 - Rollback | Partial | ~75% | Works end-to-end but in-memory only. Blocked-reason detection is solid |
+| Phase 5 - Scale + UX Hardening | Early | ~30% | Movie scan works but execute path lacks movie-specific handling. No background progress, no trickplay during merge |
+| Phase 6 - Verification | Early | ~40% | 94 unit tests pass. Missing: integration tests for real filesystem merges, failure injection, E2E Playwright |
+
+### Remediation Priority
+
+**Production blockers (do first):**
+
+1. Persist execute/audit state to Postgres — addresses issues #2, #9, #13
+2. Handle EXDEV cross-filesystem renames — issue #3
+3. Add `move_file`/`delete_dir` op types + empty-dir cleanup after merges — issue #1
+
+**Functionality gaps (do next):**
+
+4. Enrich scan with episode-level detail + episode counting — issues #4, #5
+5. Wire up quality parser for auto-merge resolution — issue #6
+6. Movie-specific execute path — issue #7
+
+**Correctness and hardening:**
+
+7. Replace `DefaultHasher` with stable hash for fingerprints — issue #12
+8. Implement `validate_plan_for_media_type()` — issue #10
+9. Constrain `is_year()` range — issue #8
+10. Add pagination to scan results — issue #11
+11. Wire up `follow_symlinks` config — issue #14
+12. Add rate limiting — issue #15
+13. Deduplicate `PaginationMeta`, fix health envelope, review `base_path` exposure — issues #16, #17, #18
+
+---
+
 ## Success Criteria
 
 - [ ] Directory parser normalizes all specified examples and edge cases.

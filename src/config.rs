@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::error::AppError;
+use crate::models::execute::MovieRenameMode;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -17,6 +18,7 @@ pub struct AppConfig {
     pub port: u16,
     pub scan_ttl_minutes: u64,
     pub follow_symlinks: bool,
+    pub movie_rename_mode: MovieRenameMode,
 }
 
 impl AppConfig {
@@ -39,6 +41,7 @@ impl AppConfig {
             port: parse_u16("PORT", 3001)?,
             scan_ttl_minutes: parse_u64("SCAN_TTL_MINUTES", 60)?,
             follow_symlinks: parse_bool("FOLLOW_SYMLINKS", false)?,
+            movie_rename_mode: parse_movie_rename_mode("MOVIE_RENAME_MODE", MovieRenameMode::Clean)?,
         })
     }
 
@@ -48,6 +51,7 @@ impl AppConfig {
             port = self.port,
             scan_ttl_minutes = self.scan_ttl_minutes,
             follow_symlinks = self.follow_symlinks,
+            movie_rename_mode = ?self.movie_rename_mode,
             tv_base_path = %self.tv_base_path.display(),
             movies_base_path = %self.movies_base_path.display(),
             audit_log_dir = %self.audit_log_dir.display(),
@@ -191,11 +195,28 @@ fn parse_bool(key: &'static str, default: bool) -> Result<bool, AppError> {
     }
 }
 
+fn parse_movie_rename_mode(
+    key: &'static str,
+    default: MovieRenameMode,
+) -> Result<MovieRenameMode, AppError> {
+    let raw = env::var(key).unwrap_or_else(|_| match default {
+        MovieRenameMode::Clean => "clean".to_string(),
+        MovieRenameMode::ProviderIds => "provider_ids".to_string(),
+    });
+
+    match raw.to_ascii_lowercase().as_str() {
+        "clean" => Ok(MovieRenameMode::Clean),
+        "provider_ids" | "provider-ids" | "providerids" => Ok(MovieRenameMode::ProviderIds),
+        _ => Err(AppError::InvalidConfigValue { key, value: raw }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::AppConfig;
+    use crate::models::execute::MovieRenameMode;
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -235,6 +256,7 @@ mod tests {
                 ("HOST", None),
                 ("SCAN_TTL_MINUTES", None),
                 ("FOLLOW_SYMLINKS", None),
+                ("MOVIE_RENAME_MODE", None),
             ],
             || {
                 let config = AppConfig::from_env().expect("config from env");
@@ -243,6 +265,7 @@ mod tests {
                 assert_eq!(config.port, 3001);
                 assert_eq!(config.scan_ttl_minutes, 60);
                 assert!(!config.follow_symlinks);
+                assert_eq!(config.movie_rename_mode, MovieRenameMode::Clean);
             },
         );
     }
@@ -258,6 +281,14 @@ mod tests {
     #[test]
     fn rejects_invalid_bool() {
         with_env_overrides(&[("FOLLOW_SYMLINKS", Some("sometimes"))], || {
+            let result = AppConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn rejects_invalid_movie_rename_mode() {
+        with_env_overrides(&[("MOVIE_RENAME_MODE", Some("surprise"))], || {
             let result = AppConfig::from_env();
             assert!(result.is_err());
         });

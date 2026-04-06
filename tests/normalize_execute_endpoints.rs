@@ -9,6 +9,7 @@ use std::sync::Arc;
 use supafast_jellyfin::{
     config::AppConfig,
     http::build_app,
+    models::execute::MovieRenameMode,
     services::scan::{InMemoryScanService, ScanService},
     state::AppState,
 };
@@ -24,9 +25,10 @@ fn test_app() -> axum::Router {
         port: 3001,
         scan_ttl_minutes: 60,
         follow_symlinks: false,
+        movie_rename_mode: MovieRenameMode::Clean,
     };
     let scan_service: Arc<dyn ScanService> = Arc::new(InMemoryScanService::new());
-    let state = AppState::new(config, scan_service);
+    let state = AppState::new(config, scan_service, None);
     build_app(state)
 }
 
@@ -714,7 +716,9 @@ async fn post_execute_rejects_preflight_collision_with_409() {
     assert_eq!(body["error"]["code"], Value::String("preflight_failed".to_string()));
     assert_eq!(
         body["error"]["message"],
-        Value::String("multiple operations target the same path".to_string())
+        Value::String(
+            "duplicate group 'Animal Control (2023)' requires conflict resolution".to_string()
+        )
     );
 }
 
@@ -753,7 +757,69 @@ async fn post_execute_rejects_real_world_duplicate_movie_dirs_without_resolution
     assert_eq!(body["error"]["code"], Value::String("preflight_failed".to_string()));
     assert_eq!(
         body["error"]["message"],
-        Value::String("multiple operations target the same path".to_string())
+        Value::String(
+            "duplicate group '28 Years Later - The Bone Temple (2026)' requires conflict resolution"
+                .to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn post_execute_reports_recommended_source_for_equivalent_tv_duplicate_group() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "Quality Show 2024 - [tmdbid-1]";
+    let source_b = "Quality Show - 2024 [tvdbid-2]";
+
+    std::fs::create_dir_all(temp.path().join(source_a).join("Season 01"))
+        .expect("create source a season");
+    std::fs::create_dir_all(temp.path().join(source_b).join("Season 1"))
+        .expect("create source b season");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Season 01")
+            .join("Quality Show - S01E01 - Pilot [WEBDL-1080p][h264]-AAA.mkv"),
+        vec![0_u8; 100],
+    )
+    .expect("write source a episode");
+    std::fs::write(
+        temp.path()
+            .join(source_b)
+            .join("Season 1")
+            .join("Quality Show - S01E01 - Pilot [WEB-DL-1080p][h264]-BBB.mkv"),
+        vec![0_u8; 103],
+    )
+    .expect("write source b equivalent episode");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"tv-recommended-resolution","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = parse_json(response).await;
+    assert_eq!(body["error"]["code"], Value::String("preflight_failed".to_string()));
+    assert_eq!(
+        body["error"]["message"],
+        Value::String(
+            "duplicate group 'Quality Show (2024)' requires conflict resolution; recommended selected_source_directory is 'Quality Show - 2024 [tvdbid-2]'"
+                .to_string()
+        )
     );
 }
 
@@ -835,7 +901,7 @@ async fn post_execute_allows_manual_conflict_resolution_for_real_world_movie_mer
     }
     assert!(completed, "normalize job did not complete in expected time window");
 
-    let resolved_root = temp.path().join(source_b);
+    let resolved_root = temp.path().join("28 Years Later - The Bone Temple (2026)");
     assert!(
         resolved_root.join(trickplay_relative).join("3.jpg").is_file(),
         "expected merged trickplay file to be present under selected source"
@@ -847,6 +913,10 @@ async fn post_execute_allows_manual_conflict_resolution_for_real_world_movie_mer
     assert!(
         !temp.path().join(source_a).join(trickplay_relative).join("3.jpg").exists(),
         "expected source file to be moved out of non-selected folder"
+    );
+    assert!(
+        !temp.path().join(source_b).exists(),
+        "expected selected source directory to be renamed to canonical movie name"
     );
 }
 
@@ -948,6 +1018,241 @@ async fn post_execute_merges_duplicate_movie_folders_into_selected_source() {
     assert!(temp.path().join(canonical).join("a.mkv").is_file());
     assert!(temp.path().join(canonical).join("b.mkv").is_file());
     assert!(!temp.path().join(source_a).join("a.mkv").exists());
+}
+
+#[tokio::test]
+async fn post_execute_movie_merge_renames_selected_source_to_canonical_name_even_with_tagged_override(
+) {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "Ghostbusters (1984) [tmdbid-620]";
+    let source_b = "Ghostbusters (1984) - [imdb-tt0087332]";
+    let canonical = "Ghostbusters (1984)";
+
+    std::fs::create_dir(temp.path().join(source_a)).expect("create source a");
+    std::fs::create_dir(temp.path().join(source_b)).expect("create source b");
+    std::fs::write(temp.path().join(source_a).join("landscape.jpg"), "poster")
+        .expect("write source artwork");
+
+    let scan_id = create_scan_with_media_type(&app, &temp.path().display().to_string(), "movie").await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"ghostbusters-movie-merge","media_type":"movie","base_path":"{}","name_overrides":[{{"source_directory":"{}","normalized_name":"{}"}}],"conflict_resolutions":[{{"normalized_name":"Ghostbusters (1984)","selected_source_directory":"{}"}}],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b,
+        source_b,
+        source_b
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..200 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    assert!(
+        temp.path().join(canonical).join("landscape.jpg").is_file(),
+        "expected artwork to live under canonical movie directory"
+    );
+    assert!(
+        !temp.path().join(source_a).exists(),
+        "expected duplicate source folder to be removed after merge"
+    );
+    assert!(
+        !temp.path().join(source_b).exists(),
+        "expected tagged selected source folder to be renamed to canonical name"
+    );
+}
+
+#[tokio::test]
+async fn post_execute_movie_one_pass_normalizes_primary_movie_files_but_keeps_artwork_names() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_dir = temp.path().join("Ghostbusters (1984) - [imdb-tt0087332]");
+    std::fs::create_dir(&source_dir).expect("create source dir");
+    std::fs::write(
+        source_dir.join("Ghostbusters (1984) - [imdb-tt0087332].mkv"),
+        "video",
+    )
+    .expect("write movie");
+    std::fs::write(
+        source_dir.join("Ghostbusters (1984) - [imdb-tt0087332].nfo"),
+        "<movie />",
+    )
+    .expect("write nfo");
+    std::fs::write(
+        source_dir.join("Ghostbusters (1984) - [imdb-tt0087332].en.srt"),
+        "subtitle",
+    )
+    .expect("write subtitle");
+    std::fs::write(source_dir.join("landscape.jpg"), "art").expect("write artwork");
+
+    let scan_id = create_scan_with_media_type(&app, &temp.path().display().to_string(), "movie").await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"ghostbusters-one-pass","media_type":"movie","base_path":"{}","name_overrides":[],"conflict_resolutions":[],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display()
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..200 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let canonical_dir = temp.path().join("Ghostbusters (1984)");
+    assert!(canonical_dir.join("Ghostbusters (1984).mkv").is_file());
+    assert!(canonical_dir.join("movie.nfo").is_file());
+    assert!(canonical_dir.join("Ghostbusters (1984).en.srt").is_file());
+    assert!(canonical_dir.join("landscape.jpg").is_file());
+    assert!(
+        !canonical_dir
+            .join("Ghostbusters (1984) - [imdb-tt0087332].mkv")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn post_execute_movie_provider_ids_mode_keeps_provider_tags_in_folder_and_video_names() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = temp.path().join("Ghostbusters (1984) [tmdbid-620]");
+    let source_b = temp.path().join("Ghostbusters (1984) - [imdb-tt0087332]");
+    std::fs::create_dir(&source_a).expect("create source a");
+    std::fs::create_dir(&source_b).expect("create source b");
+    std::fs::write(
+        source_a.join("Ghostbusters (1984) [tmdbid-620].mkv"),
+        "video-a",
+    )
+    .expect("write movie a");
+    std::fs::write(
+        source_b.join("Ghostbusters (1984) - [imdb-tt0087332].nfo"),
+        "<movie />",
+    )
+    .expect("write nfo b");
+
+    let scan_id = create_scan_with_media_type(&app, &temp.path().display().to_string(), "movie").await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"ghostbusters-provider-ids","media_type":"movie","base_path":"{}","name_overrides":[],"conflict_resolutions":[{{"normalized_name":"Ghostbusters (1984)","selected_source_directory":"{}"}}],"movie_rename_mode":"provider_ids","dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b.file_name().and_then(|v| v.to_str()).expect("source b name")
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    for _ in 0..200 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            break;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let canonical_dir =
+        temp.path()
+            .join("Ghostbusters (1984) [tmdbid-620] [imdbid-tt0087332]");
+    assert!(
+        canonical_dir
+            .join("Ghostbusters (1984) [tmdbid-620] [imdbid-tt0087332].mkv")
+            .is_file()
+    );
+    assert!(canonical_dir.join("movie.nfo").is_file());
 }
 
 #[tokio::test]

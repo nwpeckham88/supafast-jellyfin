@@ -5,7 +5,9 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::Value;
-use supafast_jellyfin::{config::AppConfig, http::build_app, state::AppState};
+use supafast_jellyfin::{
+    config::AppConfig, http::build_app, models::execute::MovieRenameMode, state::AppState,
+};
 use tower::ServiceExt;
 
 fn test_app() -> axum::Router {
@@ -18,6 +20,7 @@ fn test_app() -> axum::Router {
         port: 3001,
         scan_ttl_minutes: 60,
         follow_symlinks: false,
+        movie_rename_mode: MovieRenameMode::Clean,
     };
     build_app(AppState::new_for_tests(config))
 }

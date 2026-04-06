@@ -1,4 +1,6 @@
-use supafast_jellyfin::parsers::directory::normalize_directory_name;
+use supafast_jellyfin::parsers::directory::{
+    append_metadata_tags, extract_metadata_tags, normalize_directory_name,
+};
 
 #[test]
 fn normalizes_real_world_sample_directory_fixtures() {
@@ -59,4 +61,24 @@ fn removes_trailing_separator_artifacts() {
 #[test]
 fn preserves_non_metadata_brackets() {
     assert_eq!(normalize_directory_name("[REC] 2007"), "[REC] (2007)");
+}
+
+#[test]
+fn extracts_and_canonicalizes_supported_metadata_tags() {
+    assert_eq!(
+        extract_metadata_tags("Ghostbusters (1984) [tmdbid-620] [imdb-tt0087332]"),
+        vec!["tmdbid-620".to_string(), "imdbid-tt0087332".to_string()]
+    );
+    assert_eq!(extract_metadata_tags("Predator 2 (1990) - [imdb-]"), Vec::<String>::new());
+}
+
+#[test]
+fn appends_metadata_tags_in_jellyfin_style() {
+    assert_eq!(
+        append_metadata_tags(
+            "Ghostbusters (1984)",
+            &["tmdbid-620".to_string(), "imdbid-tt0087332".to_string()]
+        ),
+        "Ghostbusters (1984) [tmdbid-620] [imdbid-tt0087332]"
+    );
 }

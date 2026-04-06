@@ -27,14 +27,24 @@ export function buildConflictsFromScan(scanResult: ScanResult | null): ConflictI
 
   return scanResult.groups
     .filter((group) => group.source_directories.length > 1)
-    .map((group) => ({
-      id: group.normalized_name,
-      normalizedName: group.normalized_name,
-      candidates: group.source_directories.map((sourceDirectory, index) => ({
-        id: `${group.normalized_name}-${index}`,
+    .map((group) => {
+      const candidates = group.source_directories.map((sourceDirectory, index) => ({
+        id: buildCandidateId(group.normalized_name, index),
         sourceDirectory
-      }))
-    }));
+      }));
+
+      const recommendedSourceDirectory = preferredSourceDirectoryForGroup(group);
+      const recommendedCandidate = candidates.find(
+        (candidate) => candidate.sourceDirectory === recommendedSourceDirectory
+      );
+
+      return {
+        id: group.normalized_name,
+        normalizedName: group.normalized_name,
+        candidates,
+        recommendedCandidateId: recommendedCandidate?.id ?? null
+      };
+    });
 }
 
 export function prioritizeConflictGroups(groups: ScanGroup[]): ScanGroup[] {
@@ -62,6 +72,10 @@ function pickLikelyBestCandidateId(conflict: ConflictItem): string | null {
     return null;
   }
 
+  if (conflict.recommendedCandidateId) {
+    return conflict.recommendedCandidateId;
+  }
+
   let bestId: string | null = null;
   let bestScore = Number.NEGATIVE_INFINITY;
 
@@ -74,6 +88,38 @@ function pickLikelyBestCandidateId(conflict: ConflictItem): string | null {
   }
 
   return bestId;
+}
+
+function buildCandidateId(conflictId: string, index: number): string {
+  return `${conflictId}-${index}`;
+}
+
+function preferredSourceDirectoryForGroup(group: ScanGroup): string | null {
+  if (!group.episodes || group.episodes.length === 0) {
+    return null;
+  }
+
+  const preferredSources = new Set<string>();
+  let overlappingSlotCount = 0;
+
+  for (const slot of group.episodes) {
+    if (slot.candidates.length <= 1) {
+      continue;
+    }
+
+    overlappingSlotCount += 1;
+    if (slot.conflict || !slot.auto_selected_source_directory) {
+      return null;
+    }
+
+    preferredSources.add(slot.auto_selected_source_directory);
+  }
+
+  if (overlappingSlotCount === 0 || preferredSources.size !== 1) {
+    return null;
+  }
+
+  return Array.from(preferredSources)[0] ?? null;
 }
 
 export const conflictsStore = {
@@ -90,16 +136,19 @@ export const conflictsStore = {
 
       for (const item of items) {
         const selectedCandidateId = state[item.id];
-        if (!selectedCandidateId) {
-          continue;
+        if (selectedCandidateId) {
+          const candidateStillExists = item.candidates.some(
+            (candidate) => candidate.id === selectedCandidateId
+          );
+
+          if (candidateStillExists) {
+            next[item.id] = selectedCandidateId;
+            continue;
+          }
         }
 
-        const candidateStillExists = item.candidates.some(
-          (candidate) => candidate.id === selectedCandidateId
-        );
-
-        if (candidateStillExists) {
-          next[item.id] = selectedCandidateId;
+        if (item.recommendedCandidateId) {
+          next[item.id] = item.recommendedCandidateId;
         }
       }
 

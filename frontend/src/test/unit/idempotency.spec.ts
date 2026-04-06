@@ -30,7 +30,7 @@ describe('generateUuid', () => {
 
     vi.stubGlobal('crypto', {
       getRandomValues: mockGetRandomValues
-    } as Crypto);
+    } as unknown as Crypto);
 
     const value = generateUuid();
     expect(mockGetRandomValues).toHaveBeenCalledOnce();

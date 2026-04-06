@@ -7,9 +7,37 @@ export interface ScanSummary {
   conflicts: number;
 }
 
+export interface ScanEpisodeCandidate {
+  source_directory: string;
+  relative_path: string;
+  normalized_relative_path: string;
+  season_number: number;
+  episode_number: number;
+  extension: string;
+  file_size: number;
+  quality: {
+    resolution: string | null;
+    codec: string | null;
+    source: string | null;
+    group: string | null;
+    size_bytes: number | null;
+  };
+}
+
+export interface ScanEpisodeSlot {
+  season_number: number;
+  episode_number: number;
+  candidates: ScanEpisodeCandidate[];
+  auto_selected_source_directory: string | null;
+  conflict: boolean;
+}
+
 export interface ScanGroup {
   normalized_name: string;
   source_directories: string[];
+  episode_count?: number;
+  conflict_count?: number;
+  episodes?: ScanEpisodeSlot[];
 }
 
 export interface ScanResult {
@@ -44,6 +72,7 @@ export interface ConflictItem {
   id: string;
   normalizedName: string;
   candidates: ConflictCandidate[];
+  recommendedCandidateId?: string | null;
 }
 
 export interface RollbackSessionSummary {
