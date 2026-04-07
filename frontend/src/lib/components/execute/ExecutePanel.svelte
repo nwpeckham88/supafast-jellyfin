@@ -1,8 +1,16 @@
 <script lang="ts">
-  import type { NormalizeAuditEntry } from '$lib/models/normalize';
+  import type {
+    ExtraFileType,
+    MediaType,
+    MovieRenameMode,
+    NormalizeAuditEntry
+  } from '$lib/models/normalize';
 
   interface Props {
+    mediaType: MediaType;
     idempotencyKey: string;
+    movieRenameMode: MovieRenameMode;
+    removeExtraFileTypes: ExtraFileType[];
     jobId: string;
     status: 'pending' | 'running' | 'completed' | 'failed' | null;
     totalOps: number;
@@ -17,6 +25,9 @@
     loadingEntries: boolean;
     error: string | null;
     onIdempotencyKeyChange: (value: string) => void;
+    onMovieRenameModeChange: (value: MovieRenameMode) => void;
+    onToggleExtraFileType: (value: ExtraFileType) => void;
+    onClearExtraFileTypes: () => void;
     onGenerateIdempotencyKey: () => void;
     onDryRun: () => void;
     onExecute: () => void;
@@ -27,7 +38,10 @@
   }
 
   let {
+    mediaType,
     idempotencyKey,
+    movieRenameMode,
+    removeExtraFileTypes,
     jobId,
     status,
     totalOps,
@@ -42,6 +56,9 @@
     loadingEntries,
     error,
     onIdempotencyKeyChange,
+    onMovieRenameModeChange,
+    onToggleExtraFileType,
+    onClearExtraFileTypes,
     onGenerateIdempotencyKey,
     onDryRun,
     onExecute,
@@ -80,6 +97,17 @@
         return 'bg-slate-100 text-slate-700 border-slate-300';
     }
   }
+
+  const cleanupOptions: Array<{
+    value: ExtraFileType;
+    label: string;
+    description: string;
+  }> = [
+    { value: 'media', label: 'Extra media', description: 'Trash duplicate video files from the non-selected folder.' },
+    { value: 'nfo', label: 'Extra NFO', description: 'Trash duplicate local metadata files from the non-selected folder.' },
+    { value: 'srt', label: 'Extra subtitles', description: 'Trash duplicate subtitles from the non-selected folder.' },
+    { value: 'trickplay', label: 'Extra trickplay', description: 'Trash duplicate trickplay trees from the non-selected folder.' }
+  ];
 </script>
 
 <section class="glass fade-up rounded-2xl p-4 sm:p-5 md:p-6">
@@ -131,6 +159,99 @@
   <p class="mt-2 text-xs text-slate-600">
     Reuse the same key to safely replay status without re-applying filesystem operations.
   </p>
+
+  <article class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h3 class="text-sm font-semibold text-slate-900">Run Preferences</h3>
+        <p class="mt-1 text-xs text-slate-600">
+          Naming style and duplicate-folder cleanup rules apply to this normalize run.
+        </p>
+      </div>
+      <div class="flex flex-wrap gap-2 text-[11px] text-slate-700">
+        <span class="rounded-full border border-slate-300 bg-white px-2 py-1 font-medium">
+          Media type: {mediaType.toUpperCase()}
+        </span>
+        <span class="rounded-full border border-teal-300 bg-teal-50 px-2 py-1 font-medium text-teal-900">
+          Naming: {movieRenameMode === 'clean' ? 'Clean Jellyfin' : 'Provider IDs'}
+        </span>
+        <span class="rounded-full border border-amber-300 bg-amber-50 px-2 py-1 font-medium text-amber-900">
+          Cleanup: {removeExtraFileTypes.length ? removeExtraFileTypes.join(', ') : 'keep all extras'}
+        </span>
+      </div>
+    </div>
+
+    <div class="mt-4 grid gap-4 lg:grid-cols-[1.1fr_1fr]">
+      <section class="rounded-xl border border-slate-200 bg-white p-3">
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Library Naming</p>
+        <div class="mt-3 grid gap-2">
+          <label class="rounded-lg border border-slate-200 p-3">
+            <div class="flex items-start gap-3">
+              <input
+                checked={movieRenameMode === 'clean'}
+                name="movie-rename-mode"
+                onchange={() => onMovieRenameModeChange('clean')}
+                type="radio"
+              />
+              <div>
+                <p class="text-sm font-semibold text-slate-900">Clean Jellyfin Names</p>
+                <p class="mt-1 text-xs text-slate-600">
+                  Strips provider tags from top-level show or movie folders while keeping standard Jellyfin naming like <span class="font-medium text-slate-800">Ghostbusters (1984)</span>.
+                </p>
+              </div>
+            </div>
+          </label>
+          <label class="rounded-lg border border-slate-200 p-3">
+            <div class="flex items-start gap-3">
+              <input
+                checked={movieRenameMode === 'provider_ids'}
+                name="movie-rename-mode"
+                onchange={() => onMovieRenameModeChange('provider_ids')}
+                type="radio"
+              />
+              <div>
+                <p class="text-sm font-semibold text-slate-900">Provider-ID Names</p>
+                <p class="mt-1 text-xs text-slate-600">
+                  Preserves provider IDs on the top-level folder for stronger matching in both movie and TV libraries.
+                </p>
+              </div>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      <section class="rounded-xl border border-slate-200 bg-white p-3">
+        <div class="flex items-center justify-between gap-3">
+          <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Duplicate Cleanup</p>
+          <button
+            class="rounded-lg border border-slate-300 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+            onclick={onClearExtraFileTypes}
+            type="button"
+          >
+            Keep All
+          </button>
+        </div>
+        <div class="mt-3 space-y-2">
+          {#each cleanupOptions as option}
+            <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3">
+              <input
+                checked={removeExtraFileTypes.includes(option.value)}
+                onchange={() => onToggleExtraFileType(option.value)}
+                type="checkbox"
+              />
+              <div>
+                <p class="text-sm font-semibold text-slate-900">{option.label}</p>
+                <p class="mt-1 text-xs text-slate-600">{option.description}</p>
+              </div>
+            </label>
+          {/each}
+        </div>
+        <p class="mt-3 text-[11px] text-slate-500">
+          Selected cleanup types are moved into <span class="font-medium text-slate-700">.supafast-trash</span> from non-selected duplicate folders so rollback can restore them.
+        </p>
+      </section>
+    </div>
+  </article>
 
   <div class="mt-4 flex flex-wrap gap-2">
     <button

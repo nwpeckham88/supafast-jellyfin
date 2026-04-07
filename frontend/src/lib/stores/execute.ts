@@ -7,8 +7,10 @@ import {
 } from '$lib/api/normalize';
 import type {
   ConflictItem,
+  ExtraFileType,
   ExecuteNormalizeResponse,
   MediaType,
+  MovieRenameMode,
   NormalizeAuditEntry,
   NormalizeJobStatusResponse,
   ScanResult
@@ -22,6 +24,8 @@ interface ExecuteStartInput {
   dryRun: boolean;
   conflictItems: ConflictItem[];
   conflictSelections: Record<string, string>;
+  movieRenameMode: MovieRenameMode;
+  removeExtraFileTypes: ExtraFileType[];
 }
 
 export interface ExecuteStoreState {
@@ -29,6 +33,8 @@ export interface ExecuteStoreState {
   mediaType: MediaType;
   basePath: string;
   idempotencyKey: string;
+  movieRenameMode: MovieRenameMode;
+  removeExtraFileTypes: ExtraFileType[];
   jobId: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | null;
   totalOps: number;
@@ -51,6 +57,8 @@ const initialState: ExecuteStoreState = {
   mediaType: 'tv',
   basePath: '',
   idempotencyKey: '',
+  movieRenameMode: 'clean',
+  removeExtraFileTypes: [],
   jobId: '',
   status: null,
   totalOps: 0,
@@ -185,6 +193,22 @@ function createExecuteStore() {
     setIdempotencyKey(idempotencyKey: string) {
       update((state) => ({ ...state, idempotencyKey }));
     },
+    setMovieRenameMode(movieRenameMode: MovieRenameMode) {
+      update((state) => ({ ...state, movieRenameMode }));
+    },
+    toggleExtraFileType(extraFileType: ExtraFileType) {
+      update((state) => {
+        const next = state.removeExtraFileTypes.includes(extraFileType)
+          ? state.removeExtraFileTypes.filter((value) => value !== extraFileType)
+          : [...state.removeExtraFileTypes, extraFileType];
+
+        next.sort();
+        return { ...state, removeExtraFileTypes: next };
+      });
+    },
+    clearExtraFileTypes() {
+      update((state) => ({ ...state, removeExtraFileTypes: [] }));
+    },
     generateIdempotencyKey() {
       update((state) => ({ ...state, idempotencyKey: generateUuid() }));
     },
@@ -261,6 +285,7 @@ function createExecuteStore() {
       }));
 
       try {
+        const removeExtraFileTypes = [...input.removeExtraFileTypes].sort();
         const response = await executeNormalize({
           scan_id: input.scanResult.scan_id,
           idempotency_key: normalizedKey,
@@ -268,6 +293,8 @@ function createExecuteStore() {
           base_path: input.scanResult.base_path,
           name_overrides: [],
           conflict_resolutions: conflictResolutions,
+          movie_rename_mode: input.movieRenameMode,
+          remove_extra_file_types: removeExtraFileTypes,
           dry_run: input.dryRun
         });
 

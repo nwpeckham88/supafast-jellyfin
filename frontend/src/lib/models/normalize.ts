@@ -1,4 +1,6 @@
 export type MediaType = 'tv' | 'movie';
+export type MovieRenameMode = 'clean' | 'provider_ids';
+export type ExtraFileType = 'media' | 'nfo' | 'trickplay' | 'srt';
 
 export interface ScanSummary {
   total_shows: number;
@@ -108,6 +110,8 @@ export interface ExecuteNormalizeRequest {
     normalized_name: string;
     selected_source_directory: string;
   }>;
+  movie_rename_mode?: MovieRenameMode;
+  remove_extra_file_types?: ExtraFileType[];
   dry_run: boolean;
 }
 

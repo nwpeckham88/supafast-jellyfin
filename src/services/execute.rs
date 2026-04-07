@@ -380,8 +380,17 @@ async fn run_job(
         let source_path = job.entries[index].source_path.clone();
         let target_path = job.entries[index].target_path.clone();
         let op_type = job.entries[index].op_type.clone();
-        let revalidation_failed = if op_type == "delete_dir" || op_type == "delete_file" {
+        let revalidation_failed = if op_type == "delete_dir" {
             ensure_absolute_under_base(&canonical_base, Path::new(&source_path), true).is_err()
+        } else if op_type == "delete_file" {
+            ensure_absolute_under_base(&canonical_base, Path::new(&source_path), true).is_err()
+                || ensure_absolute_under_base_allow_missing_parents(
+                    &canonical_base,
+                    Path::new(&target_path),
+                    false,
+                )
+                .is_err()
+                || Path::new(&target_path).exists()
         } else {
             revalidate_operation_paths(
                 &canonical_base,
@@ -408,7 +417,13 @@ async fn run_job(
             if op_type == "delete_dir" {
                 std::fs::remove_dir(Path::new(&source_for_op))
             } else if op_type == "delete_file" {
-                std::fs::remove_file(Path::new(&source_for_op))
+                let source = Path::new(&source_for_op);
+                let target = Path::new(&target_for_op);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::hard_link(source, target)?;
+                std::fs::remove_file(source)
             } else {
                 fs_ops::rename_with_exdev_fallback(
                     Path::new(&source_for_op),
@@ -481,6 +496,7 @@ fn build_plan(
         .unwrap_or_default()
         .into_iter()
         .collect::<HashSet<_>>();
+    let trash_root = build_trash_root(&canonical_base, scan.scan_id, &request.idempotency_key);
     let mut operation_candidates = Vec::new();
 
     for group in &scan.groups {
@@ -532,6 +548,8 @@ fn build_plan(
                             &request.media_type,
                             selected_target_directory.as_deref(),
                             &remove_extra_file_types,
+                            &canonical_base,
+                            &trash_root,
                         )
                         .map_err(|_| preflight("failed to build merge operations from filesystem"))?,
                     );
@@ -639,6 +657,8 @@ fn build_group_merge_operations(
     media_type: &str,
     movie_target_directory_name: Option<&str>,
     remove_extra_file_types: &HashSet<ExtraFileType>,
+    canonical_base: &Path,
+    trash_root: &Path,
 ) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
     let mut operations = Vec::new();
 
@@ -672,10 +692,12 @@ fn build_group_merge_operations(
         }
 
         if source_path.is_dir() {
-            if media_type == "movie"
-                && should_remove_extra_movie_directory(&source_path, remove_extra_file_types)
-            {
-                operations.extend(build_delete_tree_operations(&source_path)?);
+            if should_remove_extra_directory(&source_path, remove_extra_file_types) {
+                operations.extend(build_delete_tree_operations(
+                    &source_path,
+                    canonical_base,
+                    trash_root,
+                )?);
                 continue;
             }
 
@@ -687,6 +709,8 @@ fn build_group_merge_operations(
                     media_type,
                     movie_target_directory_name,
                     remove_extra_file_types,
+                    canonical_base,
+                    trash_root,
                 )?);
             } else {
                 // Move entire directory to target (it's a merge move, not a simple rename)
@@ -702,15 +726,13 @@ fn build_group_merge_operations(
                 ));
             }
         } else {
-            if media_type == "movie"
-                && should_remove_extra_movie_file(&source_path, &source_name, remove_extra_file_types)
-            {
+            if should_remove_extra_file(&source_path, &source_name, remove_extra_file_types) {
                 operations.push((
                     source_name.clone(),
                     source_name.clone(),
                     PlanOpType::DeleteFile,
-                    source_path,
-                    target_group_path.join(source_name),
+                    source_path.clone(),
+                    build_trash_target_path(canonical_base, trash_root, &source_path)?,
                 ));
                 continue;
             }
@@ -864,8 +886,17 @@ fn preflight_validate(plan: &NormalizePlan, dry_run: bool) -> Result<(), Execute
         let target = Path::new(&operation.target_path);
 
         // Delete ops only need source validation.
-        if matches!(operation.op_type, PlanOpType::DeleteDir | PlanOpType::DeleteFile) {
+        if operation.op_type == PlanOpType::DeleteDir {
             ensure_absolute_under_base(&canonical_base, source, true)?;
+            continue;
+        }
+
+        if operation.op_type == PlanOpType::DeleteFile {
+            ensure_absolute_under_base(&canonical_base, source, true)?;
+            ensure_absolute_under_base_allow_missing_parents(&canonical_base, target, false)?;
+            if !dry_run && target.exists() {
+                return Err(preflight("target path already exists"));
+            }
             continue;
         }
 
@@ -919,6 +950,46 @@ fn ensure_absolute_under_base(
     let canonical_parent = parent
         .canonicalize()
         .map_err(|_| preflight("operation parent path could not be resolved"))?;
+
+    if !canonical_parent.starts_with(canonical_base) {
+        return Err(preflight("operation path escapes base path"));
+    }
+
+    if must_exist && !candidate.exists() {
+        return Err(preflight("required operation source path does not exist"));
+    }
+
+    if candidate.exists() {
+        let canonical_candidate = candidate
+            .canonicalize()
+            .map_err(|_| preflight("operation candidate path could not be resolved"))?;
+        if !canonical_candidate.starts_with(canonical_base) {
+            return Err(preflight("operation candidate escapes base path"));
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_absolute_under_base_allow_missing_parents(
+    canonical_base: &Path,
+    candidate: &Path,
+    must_exist: bool,
+) -> Result<(), ExecuteServiceError> {
+    if !candidate.is_absolute() {
+        return Err(preflight("operation path is not absolute"));
+    }
+
+    let mut ancestor = candidate.parent();
+    let canonical_parent = loop {
+        let current = ancestor.ok_or_else(|| preflight("operation path has no parent directory"))?;
+        if current.exists() {
+            break current
+                .canonicalize()
+                .map_err(|_| preflight("operation parent path could not be resolved"))?;
+        }
+        ancestor = current.parent();
+    };
 
     if !canonical_parent.starts_with(canonical_base) {
         return Err(preflight("operation path escapes base path"));
@@ -1289,7 +1360,7 @@ fn build_target_directory_name_for_source(
     source_directory: &str,
     group: &ScanGroup,
     overrides: &HashMap<&str, &str>,
-    media_type: &str,
+    _media_type: &str,
     movie_rename_mode: MovieRenameMode,
 ) -> String {
     let requested_base_name = overrides
@@ -1297,14 +1368,10 @@ fn build_target_directory_name_for_source(
         .copied()
         .unwrap_or(group.normalized_name.as_str());
 
-    if media_type != "movie" {
-        return normalize_requested_directory_name(requested_base_name);
-    }
-
-    build_movie_directory_name(requested_base_name, group, movie_rename_mode)
+    build_group_directory_name(requested_base_name, group, movie_rename_mode)
 }
 
-fn build_movie_directory_name(
+fn build_group_directory_name(
     requested_base_name: &str,
     group: &ScanGroup,
     movie_rename_mode: MovieRenameMode,
@@ -1349,6 +1416,26 @@ fn collect_group_metadata_tags(group: &ScanGroup) -> Vec<String> {
     tmdb
 }
 
+fn build_trash_root(base_path: &Path, scan_id: Uuid, idempotency_key: &str) -> PathBuf {
+    let hash = Sha256::digest(idempotency_key.trim().as_bytes());
+    let namespace = format!("{:016x}", u64::from_be_bytes(hash[..8].try_into().unwrap_or([0; 8])));
+    base_path
+        .join(".supafast-trash")
+        .join(scan_id.to_string())
+        .join(namespace)
+}
+
+fn build_trash_target_path(
+    canonical_base: &Path,
+    trash_root: &Path,
+    source_path: &Path,
+) -> Result<PathBuf, std::io::Error> {
+    let relative = source_path.strip_prefix(canonical_base).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
+    Ok(trash_root.join(relative))
+}
+
 fn build_movie_file_rename_operations(
     movie_dir: &Path,
     target_movie_name: &str,
@@ -1387,14 +1474,14 @@ fn build_movie_file_rename_operations(
     Ok(operations)
 }
 
-fn should_remove_extra_movie_directory(
+fn should_remove_extra_directory(
     source_path: &Path,
     remove_extra_file_types: &HashSet<ExtraFileType>,
 ) -> bool {
     remove_extra_file_types.contains(&ExtraFileType::Trickplay) && is_trickplay_directory(source_path)
 }
 
-fn should_remove_extra_movie_file(
+fn should_remove_extra_file(
     source_path: &Path,
     source_name: &str,
     remove_extra_file_types: &HashSet<ExtraFileType>,
@@ -1418,7 +1505,7 @@ fn should_remove_extra_movie_file(
         return true;
     }
 
-    remove_extra_file_types.contains(&ExtraFileType::Media) && is_movie_media_file(source_name)
+    remove_extra_file_types.contains(&ExtraFileType::Media) && is_media_file(source_name)
 }
 
 fn normalize_movie_related_filename(filename: &str, target_movie_name: &str) -> String {
@@ -1511,7 +1598,7 @@ fn split_movie_stem_and_suffix(input: &str) -> (&str, &str) {
     (input, "")
 }
 
-fn is_movie_media_file(name: &str) -> bool {
+fn is_media_file(name: &str) -> bool {
     let Some(extension) = Path::new(name).extension().and_then(|value| value.to_str()) else {
         return false;
     };
@@ -1538,6 +1625,8 @@ fn is_trickplay_directory(path: &Path) -> bool {
 
 fn build_delete_tree_operations(
     path: &Path,
+    canonical_base: &Path,
+    trash_root: &Path,
 ) -> Result<Vec<(String, String, PlanOpType, PathBuf, PathBuf)>, std::io::Error> {
     let mut operations = Vec::new();
 
@@ -1545,7 +1634,11 @@ fn build_delete_tree_operations(
         let entry = entry?;
         let child_path = entry.path();
         if child_path.is_dir() {
-            operations.extend(build_delete_tree_operations(&child_path)?);
+            operations.extend(build_delete_tree_operations(
+                &child_path,
+                canonical_base,
+                trash_root,
+            )?);
         } else {
             let name = entry.file_name().to_string_lossy().to_string();
             operations.push((
@@ -1553,7 +1646,7 @@ fn build_delete_tree_operations(
                 name,
                 PlanOpType::DeleteFile,
                 child_path.clone(),
-                child_path,
+                build_trash_target_path(canonical_base, trash_root, &child_path)?,
             ));
         }
     }

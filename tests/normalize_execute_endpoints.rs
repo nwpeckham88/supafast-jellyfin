@@ -74,6 +74,33 @@ async fn create_scan_with_media_type(
         .to_string()
 }
 
+async fn wait_for_job_completion(app: &axum::Router, job_id: &str) {
+    for _ in 0..250 {
+        let status_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/normalize/jobs/{job_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status_body = parse_json(status_response).await;
+        let status = status_body["data"]["status"].as_str().unwrap_or_default();
+        if status == "completed" {
+            return;
+        }
+        if status == "failed" {
+            panic!("normalize job failed");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    panic!("normalize job did not complete in time");
+}
+
 #[tokio::test]
 async fn post_execute_movie_mode_renames_directory_only() {
     let app = test_app();
@@ -1813,4 +1840,154 @@ async fn post_execute_rejects_second_active_job_for_same_base_path() {
         .await
         .expect("response");
     assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn post_execute_applies_provider_id_naming_to_tv_folders() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "Planet Earth (2006) - [tvdbid-79257]";
+    let source_b = "Planet Earth 2006 [tmdbid-1044]";
+
+    std::fs::create_dir_all(temp.path().join(source_a).join("Season 01"))
+        .expect("create source a season");
+    std::fs::create_dir_all(temp.path().join(source_b).join("Season 1"))
+        .expect("create source b season");
+    std::fs::write(
+        temp.path()
+            .join(source_b)
+            .join("Season 1")
+            .join("Planet Earth - S01E01 - From Pole to Pole.mkv"),
+        "episode",
+    )
+    .expect("write episode");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"tv-provider-ids","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[{{"normalized_name":"Planet Earth (2006)","selected_source_directory":"{}"}}],"movie_rename_mode":"provider_ids","dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    wait_for_job_completion(&app, job_id).await;
+
+    let expected_show = temp
+        .path()
+        .join("Planet Earth (2006) [tmdbid-1044] [tvdbid-79257]");
+    assert!(expected_show.join("Season 1").is_dir());
+    assert!(
+        expected_show
+            .join("Season 1")
+            .join("01x01 - From Pole to Pole.mkv")
+            .is_file()
+    );
+}
+
+#[tokio::test]
+async fn post_execute_applies_cleanup_preferences_to_tv_merges() {
+    let app = test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_a = "Cleanup Show (2022) - [tvdbid-100]";
+    let source_b = "Cleanup Show 2022 [tmdbid-200]";
+
+    std::fs::create_dir_all(
+        temp.path()
+            .join(source_a)
+            .join("Season 01")
+            .join("01x01 - Pilot.trickplay/320 - 10x10"),
+    )
+    .expect("create trickplay dir");
+    std::fs::create_dir_all(temp.path().join(source_b).join("Season 1"))
+        .expect("create selected season");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Season 01")
+            .join("Cleanup Show - S01E01 - Pilot.mkv"),
+        "losing-episode",
+    )
+    .expect("write losing episode");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Season 01")
+            .join("Cleanup Show - S01E01 - Pilot.nfo"),
+        "<episodedetails />",
+    )
+    .expect("write losing nfo");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Season 01")
+            .join("Cleanup Show - S01E01 - Pilot.en.srt"),
+        "subtitle",
+    )
+    .expect("write losing subtitle");
+    std::fs::write(
+        temp.path()
+            .join(source_a)
+            .join("Season 01")
+            .join("01x01 - Pilot.trickplay/320 - 10x10/1.jpg"),
+        "thumb",
+    )
+    .expect("write trickplay image");
+    std::fs::write(
+        temp.path()
+            .join(source_b)
+            .join("Season 1")
+            .join("Cleanup Show - S01E02 - Return.mkv"),
+        "selected-episode",
+    )
+    .expect("write selected episode");
+
+    let scan_id = create_scan(&app, &temp.path().display().to_string()).await;
+    let payload = format!(
+        r#"{{"scan_id":"{}","idempotency_key":"tv-remove-extras","media_type":"tv","base_path":"{}","name_overrides":[],"conflict_resolutions":[{{"normalized_name":"Cleanup Show (2022)","selected_source_directory":"{}"}}],"remove_extra_file_types":["media","nfo","srt","trickplay"],"dry_run":false}}"#,
+        scan_id,
+        temp.path().display(),
+        source_b
+    );
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/normalize/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let execute_body = parse_json(execute_response).await;
+    let job_id = execute_body["data"]["job_id"].as_str().expect("job id");
+
+    wait_for_job_completion(&app, job_id).await;
+
+    let expected_show = temp.path().join("Cleanup Show (2022)");
+    let season_dir = expected_show.join("Season 1");
+    assert!(season_dir.join("01x02 - Return.mkv").is_file());
+    assert!(!season_dir.join("01x01 - Pilot.mkv").exists());
+    assert!(!season_dir.join("01x01 - Pilot.nfo").exists());
+    assert!(!season_dir.join("01x01 - Pilot.en.srt").exists());
+    assert!(!season_dir.join("01x01 - Pilot.trickplay").exists());
 }

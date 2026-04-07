@@ -197,7 +197,10 @@
 
     <div class="space-y-5">
       <ExecutePanel
+        mediaType={$executeStore.mediaType}
         idempotencyKey={$executeStore.idempotencyKey}
+        movieRenameMode={$executeStore.movieRenameMode}
+        removeExtraFileTypes={$executeStore.removeExtraFileTypes}
         jobId={$executeStore.jobId}
         status={$executeStore.status}
         totalOps={$executeStore.totalOps}
@@ -212,6 +215,9 @@
         loadingEntries={$executeStore.loadingEntries}
         error={$executeStore.error}
         onIdempotencyKeyChange={(value) => executeStore.setIdempotencyKey(value)}
+        onMovieRenameModeChange={(value) => executeStore.setMovieRenameMode(value)}
+        onToggleExtraFileType={(value) => executeStore.toggleExtraFileType(value)}
+        onClearExtraFileTypes={() => executeStore.clearExtraFileTypes()}
         onGenerateIdempotencyKey={() => executeStore.generateIdempotencyKey()}
         onDryRun={() =>
           executeStore.startExecute({
@@ -219,7 +225,9 @@
             idempotencyKey: $executeStore.idempotencyKey,
             dryRun: true,
             conflictItems: $conflictItems,
-            conflictSelections: $conflictSelections
+            conflictSelections: $conflictSelections,
+            movieRenameMode: $executeStore.movieRenameMode,
+            removeExtraFileTypes: $executeStore.removeExtraFileTypes
           })}
         onExecute={() =>
           executeStore.startExecute({
@@ -227,7 +235,9 @@
             idempotencyKey: $executeStore.idempotencyKey,
             dryRun: false,
             conflictItems: $conflictItems,
-            conflictSelections: $conflictSelections
+            conflictSelections: $conflictSelections,
+            movieRenameMode: $executeStore.movieRenameMode,
+            removeExtraFileTypes: $executeStore.removeExtraFileTypes
           })}
         onRefreshStatus={() => executeStore.refreshStatus()}
         onRefreshEntries={() => executeStore.refreshEntries()}

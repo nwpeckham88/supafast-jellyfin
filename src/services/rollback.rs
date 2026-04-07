@@ -344,16 +344,35 @@ async fn run_rollback_job(
         let source = Path::new(&operation.source_path);
         let target = Path::new(&operation.target_path);
 
-        if classify_blocked_reason(canonical_base, source, target).is_some() {
+        let blocked = if operation.op_type == "delete_dir" {
+            classify_delete_dir_blocked_reason(canonical_base, target)
+        } else if operation.op_type == "delete_file" {
+            classify_delete_file_blocked_reason(canonical_base, source, target)
+        } else {
+            classify_blocked_reason(canonical_base, source, target)
+        };
+        if blocked.is_some() {
             job_record.status = RollbackJobStatus::Failed;
             update_rollback_job(&rollback_state, job_record.clone())?;
             return Err(preflight("rollback operation failed safety revalidation"));
         }
 
         let rename_result = tokio::task::spawn_blocking({
+            let op_type = operation.op_type.clone();
             let source = source.to_path_buf();
             let target = target.to_path_buf();
-            move || fs_ops::rename_with_exdev_fallback(&source, &target)
+            move || {
+                if op_type == "delete_dir" {
+                    std::fs::create_dir_all(&target)
+                } else if op_type == "delete_file" {
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    fs_ops::rename_with_exdev_fallback(&source, &target)
+                } else {
+                    fs_ops::rename_with_exdev_fallback(&source, &target)
+                }
+            }
         })
         .await;
 
@@ -402,14 +421,37 @@ fn build_rollback_operations(
         .iter()
         .filter(|entry| entry.status == AuditOpStatus::Succeeded)
         .map(|entry| {
-            if entry.op_type == "delete_file" {
+            if entry.op_type == "delete_dir" {
+                let target_path = entry.source_path.clone();
+                let blocked_reason = classify_delete_dir_blocked_reason(
+                    &canonical_base,
+                    Path::new(&target_path),
+                );
                 return RollbackOperationPreview {
                     op_id: entry.op_id,
                     op_index: entry.op_index,
                     op_type: entry.op_type.clone(),
-                    source_path: entry.source_path.clone(),
-                    target_path: entry.source_path.clone(),
-                    blocked_reason: Some("delete_file operations are irreversible".to_string()),
+                    source_path: target_path.clone(),
+                    target_path,
+                    blocked_reason,
+                };
+            }
+
+            if entry.op_type == "delete_file" {
+                let source_path = entry.target_path.clone();
+                let target_path = entry.source_path.clone();
+                let blocked_reason = classify_delete_file_blocked_reason(
+                    &canonical_base,
+                    Path::new(&source_path),
+                    Path::new(&target_path),
+                );
+                return RollbackOperationPreview {
+                    op_id: entry.op_id,
+                    op_index: entry.op_index,
+                    op_type: entry.op_type.clone(),
+                    source_path,
+                    target_path,
+                    blocked_reason,
                 };
             }
 
@@ -435,6 +477,37 @@ fn build_rollback_operations(
 
     operations.sort_by(|left, right| right.op_index.cmp(&left.op_index));
     Ok(operations)
+}
+
+fn classify_delete_file_blocked_reason(
+    canonical_base: &Path,
+    source: &Path,
+    target: &Path,
+) -> Option<String> {
+    if validate_under_base(canonical_base, source, true).is_err() {
+        return Some("source path failed safety validation".to_string());
+    }
+
+    if validate_under_base_allow_missing_parents(canonical_base, target, false).is_err() {
+        return Some("target path failed safety validation".to_string());
+    }
+
+    if !source.exists() {
+        return Some("source path does not exist".to_string());
+    }
+
+    if target.exists() {
+        return Some("target path already exists".to_string());
+    }
+
+    None
+}
+
+fn classify_delete_dir_blocked_reason(canonical_base: &Path, target: &Path) -> Option<String> {
+    if validate_under_base_allow_missing_parents(canonical_base, target, false).is_err() {
+        return Some("target path failed safety validation".to_string());
+    }
+    None
 }
 
 fn classify_blocked_reason(canonical_base: &Path, source: &Path, target: &Path) -> Option<String> {
@@ -479,6 +552,47 @@ fn validate_under_base(
     let canonical_parent = parent
         .canonicalize()
         .map_err(|_| preflight("operation parent path could not be resolved"))?;
+
+    if !canonical_parent.starts_with(canonical_base) {
+        return Err(preflight("operation path escapes base path"));
+    }
+
+    if must_exist && !candidate.exists() {
+        return Err(preflight("required operation source path does not exist"));
+    }
+
+    if candidate.exists() {
+        let canonical_candidate = candidate
+            .canonicalize()
+            .map_err(|_| preflight("operation candidate path could not be resolved"))?;
+
+        if !canonical_candidate.starts_with(canonical_base) {
+            return Err(preflight("operation candidate escapes base path"));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_under_base_allow_missing_parents(
+    canonical_base: &Path,
+    candidate: &Path,
+    must_exist: bool,
+) -> Result<(), RollbackServiceError> {
+    if !candidate.is_absolute() {
+        return Err(preflight("operation path is not absolute"));
+    }
+
+    let mut ancestor = candidate.parent();
+    let canonical_parent = loop {
+        let current = ancestor.ok_or_else(|| preflight("operation path has no parent directory"))?;
+        if current.exists() {
+            break current
+                .canonicalize()
+                .map_err(|_| preflight("operation parent path could not be resolved"))?;
+        }
+        ancestor = current.parent();
+    };
 
     if !canonical_parent.starts_with(canonical_base) {
         return Err(preflight("operation path escapes base path"));
